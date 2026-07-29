@@ -1,5 +1,6 @@
 import type { CardTemplate } from '../types';
 import { richTemplates } from './richTemplates';
+import { knowledgeTemplates } from './knowledgeTemplates';
 
 /**
  * 内置模板集合（基础图层模板 + 富文本模板）
@@ -350,3 +351,6 @@ export function getTemplateById(id: string): CardTemplate | undefined {
 
 // 追加富文本模板
 templates.push(...richTemplates);
+
+// 追加知识卡片模板（放在最前面优先使用）
+templates.unshift(...knowledgeTemplates);

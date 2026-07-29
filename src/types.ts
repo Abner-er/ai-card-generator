@@ -2,77 +2,134 @@
  * AI知识卡片生成系统 - 核心类型定义
  */
 
-/** 内容区块（用于复杂模板的多段内容） */
-export interface ContentSection {
-  /** 区块ID */
+/** 知识模块类型 - 对应知识卡片中的各类信息区块 */
+export type ModuleType =
+  | 'concept'    // 概念定义
+  | 'points'     // 核心要点
+  | 'example'    // 实例说明
+  | 'suitable'   // 适用场景
+  | 'process'    // 操作流程
+  | 'note'       // 注意事项
+  | 'tip'        // 小贴士
+  | 'resource'   // 资源链接
+  | 'compare'    // 对比项
+  | 'fact';      // 关键事实
+
+/** 知识模块 - 知识卡片的核心信息单元 */
+export interface KnowledgeModule {
   id: string;
-  /** 区块标题 */
+  type: ModuleType;
   title: string;
-  /** 区块正文 */
-  body: string;
-  /** 图标标识（emoji或关键词） */
+  /** 正文内容 */
+  content: string;
+  /** 要点列表（适合"核心要点"等模块） */
+  bullets?: string[];
+  /** 图标 emoji */
   icon?: string;
-  /** 序号 */
-  index?: number;
+}
+
+/** 流程步骤 - 用于流程可视化 */
+export interface ProcessStep {
+  id: string;
+  label: string;
+  icon?: string;
+}
+
+/** 对比项 - 用于对比类卡片 */
+export interface CompareItem {
+  id: string;
+  label: string;
+  /** 选项标识（如 A/B/C） */
+  badge?: string;
+  /** 颜色主题 */
+  color?: string;
+  /** 特征列表 */
+  features: string[];
+  /** 适用人群 */
+  suitableFor?: string;
 }
 
 /** 卡片内容数据 */
 export interface CardContent {
-  /** 主标题 */
+  // ===== 基础信息 =====
   title: string;
-  /** 副标题 */
   subtitle: string;
-  /** 正文内容（支持换行） */
   body: string;
-  /** 底部信息（如作者、日期等） */
   footer: string;
-  /** 标签列表 */
   tags: string[];
-  /** 多区块内容（复杂模板使用） */
-  sections?: ContentSection[];
-  /** 要点列表（底部总结用） */
+
+  // ===== 系列信息 =====
+  /** 系列名称（如"知识速记"） */
+  seriesName?: string;
+  /** 当前期号（如"03"） */
+  episode?: string;
+  /** 总期数（如"09"） */
+  totalEpisodes?: string;
+  /** 主题编号（如"01"） */
+  topicNumber?: string;
+  /** 英文副标题 */
+  englishSubtitle?: string;
+
+  // ===== 结构化知识内容 =====
+  /** 概念定义（一段话描述） */
+  definition?: string;
+  /** 知识模块列表 */
+  modules?: KnowledgeModule[];
+  /** 流程步骤 */
+  processSteps?: ProcessStep[];
+  /** 对比项列表 */
+  compareItems?: CompareItem[];
+
+  // ===== 辅助内容 =====
+  /** 手写批注（红色手写体） */
+  handwrittenNote?: string;
+  /** 底部金句 */
+  quote?: string;
+  /** 要点列表 */
   highlights?: string[];
-  /** 章节编号（如"01"、"第四章"） */
+  /** 章节编号 */
   chapter?: string;
+
+  // ===== 兼容旧字段 =====
+  sections?: ContentSection[];
+}
+
+/** 旧版内容区块（兼容） */
+export interface ContentSection {
+  id: string;
+  title: string;
+  body: string;
+  icon?: string;
+  index?: number;
 }
 
 /** AI图片生成提示词配置 */
 export interface PromptConfig {
-  /** 视觉风格描述 */
   style: string;
-  /** 主体描述 */
   subject: string;
-  /** 构图布局 */
   composition: string;
-  /** 负面提示词（排除文字等） */
   negative: string;
-  /** 氛围与光线 */
   atmosphere: string;
-  /** 画质要求 */
   quality: string;
 }
 
 /** 渲染器类型 */
-export type RendererType = 'layer' | 'html';
+export type RendererType = 'layer' | 'html' | 'knowledge';
 
 /** 卡片模板配置 */
 export interface CardTemplate {
   id: string;
   name: string;
   description: string;
-  category: 'guofeng' | 'modern' | 'minimal' | 'scroll' | 'handcraft' | 'tech' | 'nature';
+  category: 'quick' | 'encyclopedia' | 'compare' | 'guofeng' | 'modern' | 'minimal' | 'scroll' | 'handcraft' | 'tech' | 'nature';
   canvas: {
     width: number;
     height: number;
     backgroundColor: string;
   };
-  /** AI图片生成提示词模板 */
   promptTemplate: PromptConfig;
-  /** 渲染器类型：layer=绝对定位图层，html=HTML/CSS模板 */
   renderer: RendererType;
-  /** 图层列表（layer渲染器使用，从下到上渲染） */
   layers?: TemplateLayer[];
-  /** HTML模板ID（html渲染器使用，对应RichCardRenderer中的组件） */
   htmlTemplateId?: string;
 }
 
@@ -125,15 +182,25 @@ export interface AIGeneratedContent {
   subtitle: string;
   body: string;
   tags: string[];
-  /** AI生成的配图提示词（英文，用于图片生成） */
   imagePrompt: string;
-  /** 知识点摘要，用于用户参考 */
   summary: string;
-  /** 多区块内容（复杂模板使用） */
+
+  // 结构化知识内容
+  seriesName?: string;
+  episode?: string;
+  totalEpisodes?: string;
+  topicNumber?: string;
+  englishSubtitle?: string;
+  definition?: string;
+  modules?: KnowledgeModule[];
+  processSteps?: ProcessStep[];
+  compareItems?: CompareItem[];
+  handwrittenNote?: string;
+  quote?: string;
+
+  // 兼容旧字段
   sections?: ContentSection[];
-  /** 要点列表 */
   highlights?: string[];
-  /** 章节编号 */
   chapter?: string;
 }
 

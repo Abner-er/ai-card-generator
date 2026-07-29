@@ -1,4 +1,4 @@
-import type { AITextConfig, AIGeneratedContent, CardTemplate, ContentSection } from '../types';
+import type { AITextConfig, AIGeneratedContent, CardTemplate, ContentSection, KnowledgeModule, ProcessStep, CompareItem, ModuleType } from '../types';
 
 /**
  * AI内容生成服务
@@ -40,6 +40,12 @@ export class ContentGenerationService {
     const knowledge = this.searchKnowledgeBase(topic);
     const imagePrompt = this.buildImagePrompt(topic, knowledge, template);
 
+    // 如果是知识卡片模板，生成结构化知识内容
+    const isKnowledgeTemplate = template?.renderer === 'knowledge';
+    if (isKnowledgeTemplate) {
+      return this.generateKnowledgeContent(topic, knowledge, template!, imagePrompt);
+    }
+
     // 如果是富文本模板，生成多区块结构化内容
     const isRichTemplate = template?.renderer === 'html';
     const sections = isRichTemplate ? this.generateSections(topic, knowledge, template) : undefined;
@@ -57,6 +63,364 @@ export class ContentGenerationService {
       highlights,
       chapter,
     };
+  }
+
+  /**
+   * 生成结构化知识卡片内容
+   */
+  private generateKnowledgeContent(
+    topic: string,
+    knowledge: any,
+    template: CardTemplate,
+    imagePrompt: string
+  ): AIGeneratedContent {
+    const templateId = template.htmlTemplateId || '';
+
+    // 生成系列信息
+    const seriesName = this.generateSeriesName(topic, knowledge);
+    const episode = String(Math.floor(Math.random() * 9) + 1).padStart(2, '0');
+    const totalEpisodes = '09';
+    const topicNumber = episode;
+
+    // 生成英文副标题
+    const englishSubtitle = this.generateEnglishSubtitle(topic, knowledge);
+
+    // 生成概念定义
+    const definition = knowledge.summary || knowledge.body?.slice(0, 80) + '...';
+
+    // 根据模板类型生成不同的模块和内容
+    let modules: KnowledgeModule[] = [];
+    let processSteps: ProcessStep[] | undefined;
+    let compareItems: CompareItem[] | undefined;
+    let handwrittenNote: string | undefined;
+    let quote: string | undefined;
+
+    if (templateId === 'quick-knowledge') {
+      // 知识速记卡：概念+要点+例子+注意+金句
+      modules = this.generateQuickModules(topic, knowledge);
+      processSteps = this.generateProcessSteps(topic, knowledge);
+      handwrittenNote = this.generateHandwrittenNote(topic, knowledge);
+      quote = this.generateQuote(topic, knowledge);
+    } else if (templateId === 'encyclopedia') {
+      // 百科词条卡：定义+详解+要点
+      modules = this.generateEncyclopediaModules(topic, knowledge);
+      handwrittenNote = this.generateHandwrittenNote(topic, knowledge);
+      quote = this.generateQuote(topic, knowledge);
+    } else if (templateId === 'compare-card') {
+      // 对比分析卡：多栏对比
+      compareItems = this.generateCompareItems(topic, knowledge);
+      modules = this.generateCompareModules(topic, knowledge);
+      handwrittenNote = this.generateHandwrittenNote(topic, knowledge);
+    }
+
+    return {
+      title: knowledge.title,
+      subtitle: knowledge.subtitle,
+      body: knowledge.body,
+      tags: knowledge.tags,
+      imagePrompt,
+      summary: knowledge.summary,
+      seriesName,
+      episode,
+      totalEpisodes,
+      topicNumber,
+      englishSubtitle,
+      definition,
+      modules,
+      processSteps,
+      compareItems,
+      handwrittenNote,
+      quote,
+      highlights: this.generateHighlights(knowledge),
+    };
+  }
+
+  /**
+   * 生成系列名称
+   */
+  private generateSeriesName(topic: string, knowledge: any): string {
+    const tags = knowledge.tags || [];
+    if (tags.includes('科技')) return 'Tech Knowledge';
+    if (tags.includes('历史')) return 'History Atlas';
+    if (tags.includes('自然')) return 'Nature Guide';
+    if (tags.includes('健康')) return 'Health Tips';
+    if (tags.includes('艺术')) return 'Art & Culture';
+    if (tags.includes('传统文化')) return 'Cultural Heritage';
+    return 'Knowledge Card';
+  }
+
+  /**
+   * 生成英文副标题
+   */
+  private generateEnglishSubtitle(topic: string, knowledge: any): string {
+    const subtitleMap: Record<string, string> = {
+      '人工智能': 'Artificial Intelligence',
+      '量子计算': 'Quantum Computing',
+      '区块链': 'Blockchain Technology',
+      '茶文化': 'Chinese Tea Culture',
+      '书法': 'Chinese Calligraphy',
+      '丝绸之路': 'The Silk Road',
+      '敦煌': 'Dunhuang Mogao Caves',
+      '长城': 'The Great Wall',
+      '立春': 'Beginning of Spring',
+      '睡眠': 'The Science of Sleep',
+      '深海': 'Deep Ocean',
+      '极光': 'Aurora Borealis',
+      '国画': 'Chinese Painting',
+      '京剧': 'Peking Opera',
+    };
+    return subtitleMap[topic] || 'Knowledge Quick Card';
+  }
+
+  /**
+   * 知识速记卡模块
+   */
+  private generateQuickModules(topic: string, knowledge: any): KnowledgeModule[] {
+    const body = knowledge.body || '';
+    const sentences = body.split('。').filter((s: string) => s.trim());
+    const tags = knowledge.tags || [];
+
+    return [
+      {
+        id: 'mod-1',
+        type: 'concept',
+        title: '概念定义',
+        icon: '💡',
+        content: knowledge.summary || sentences[0] || `${topic}是一个重要的知识点。`,
+      },
+      {
+        id: 'mod-2',
+        type: 'points',
+        title: '核心要点',
+        icon: '🎯',
+        content: '',
+        bullets: this.extractKeyPoints(body, tags),
+      },
+      {
+        id: 'mod-3',
+        type: 'example',
+        title: '实例说明',
+        icon: '📋',
+        content: sentences.length > 1 ? sentences[1].trim() + '。' : `${topic}在实际应用中有广泛的意义。`,
+      },
+      {
+        id: 'mod-4',
+        type: 'suitable',
+        title: '适用场景',
+        icon: '👤',
+        content: `适合对${topic}感兴趣的学习者、研究者和从业者深入了解。`,
+      },
+      {
+        id: 'mod-5',
+        type: 'note',
+        title: '注意事项',
+        icon: '⚠️',
+        content: this.generateNote(topic, knowledge),
+      },
+    ];
+  }
+
+  /**
+   * 百科词条卡模块
+   */
+  private generateEncyclopediaModules(topic: string, knowledge: any): KnowledgeModule[] {
+    const body = knowledge.body || '';
+    const sentences = body.split('。').filter((s: string) => s.trim());
+
+    return [
+      {
+        id: 'mod-1',
+        type: 'points',
+        title: '核心特征',
+        icon: '🎯',
+        content: '',
+        bullets: this.extractKeyPoints(body, knowledge.tags || []),
+      },
+      {
+        id: 'mod-2',
+        type: 'example',
+        title: '详细说明',
+        icon: '📋',
+        content: sentences.slice(0, 2).map((s: string) => s.trim()).join('。') + '。',
+      },
+      {
+        id: 'mod-3',
+        type: 'fact',
+        title: '关键事实',
+        icon: '📊',
+        content: sentences.length > 2 ? sentences[2].trim() + '。' : `${topic}具有重要的历史和现实意义。`,
+      },
+      {
+        id: 'mod-4',
+        type: 'note',
+        title: '延伸阅读',
+        icon: '📖',
+        content: `建议进一步了解${topic}的相关背景和发展历程。`,
+      },
+    ];
+  }
+
+  /**
+   * 对比分析卡模块（作为fallback）
+   */
+  private generateCompareModules(topic: string, knowledge: any): KnowledgeModule[] {
+    return [
+      {
+        id: 'mod-1',
+        type: 'concept',
+        title: '基本概念',
+        icon: '💡',
+        content: knowledge.summary || `${topic}的基本概念。`,
+      },
+      {
+        id: 'mod-2',
+        type: 'points',
+        title: '关键特点',
+        icon: '⚖️',
+        content: '',
+        bullets: this.extractKeyPoints(knowledge.body || '', knowledge.tags || []),
+      },
+    ];
+  }
+
+  /**
+   * 从正文中提取关键要点
+   */
+  private extractKeyPoints(body: string, tags: string[]): string[] {
+    const sentences = body.split('。').filter((s: string) => s.trim());
+    const points: string[] = [];
+
+    sentences.slice(0, 3).forEach((s: string) => {
+      const trimmed = s.trim();
+      if (trimmed.length > 10 && trimmed.length < 60) {
+        points.push(trimmed);
+      }
+    });
+
+    // 补充标签作为要点
+    if (points.length < 3 && tags.length > 0) {
+      tags.slice(0, 3).forEach((t: string) => {
+        if (!points.includes(t)) points.push(t);
+      });
+    }
+
+    // 确保至少有3个要点
+    while (points.length < 3) {
+      points.push(`关键信息${points.length + 1}`);
+    }
+
+    return points.slice(0, 4);
+  }
+
+  /**
+   * 生成注意事项
+   */
+  private generateNote(topic: string, knowledge: any): string {
+    const notes: Record<string, string> = {
+      '人工智能': 'AI技术发展迅速，需持续学习最新进展，注意伦理和数据安全问题。',
+      '量子计算': '量子计算仍在实验阶段，商用化还需时间，不要盲目跟风。',
+      '区块链': '注意区分区块链技术与加密货币炒作，关注实际应用场景。',
+      '睡眠': '个体差异较大，不要过度追求"标准"睡眠时间，听从身体信号。',
+      '运动': '运动前充分热身，循序渐进，避免运动损伤。',
+    };
+    return notes[topic] || `学习${topic}时注意结合理论与实践，避免纸上谈兵。`;
+  }
+
+  /**
+   * 生成流程步骤
+   */
+  private generateProcessSteps(topic: string, knowledge: any): ProcessStep[] | undefined {
+    const stepMap: Record<string, ProcessStep[]> = {
+      '人工智能': [
+        { id: 's1', label: '数据准备', icon: '📥' },
+        { id: 's2', label: '模型训练', icon: '🔧' },
+        { id: 's3', label: '测试评估', icon: '✅' },
+        { id: 's4', label: '部署应用', icon: '🚀' },
+      ],
+      '区块链': [
+        { id: 's1', label: '交易发起', icon: '📤' },
+        { id: 's2', label: '验证打包', icon: '🔐' },
+        { id: 's3', label: '共识确认', icon: '✅' },
+        { id: 's4', label: '写入区块', icon: '📦' },
+      ],
+    };
+    return stepMap[topic];
+  }
+
+  /**
+   * 生成对比项
+   */
+  private generateCompareItems(topic: string, knowledge: any): CompareItem[] {
+    // 通用三栏对比
+    const body = knowledge.body || '';
+    const sentences = body.split('。').filter((s: string) => s.trim());
+
+    return [
+      {
+        id: 'cmp-1',
+        label: '基础认知',
+        badge: 'A',
+        features: [
+          sentences[0]?.trim().slice(0, 30) || `${topic}的基本概念`,
+          '入门门槛较低',
+          '适合初学者',
+        ],
+        suitableFor: '零基础入门',
+      },
+      {
+        id: 'cmp-2',
+        label: '深入理解',
+        badge: 'B',
+        features: [
+          sentences[1]?.trim().slice(0, 30) || `${topic}的核心原理`,
+          '需要一定基础',
+          '系统化学习',
+        ],
+        suitableFor: '进阶学习者',
+      },
+      {
+        id: 'cmp-3',
+        label: '实践应用',
+        badge: 'C',
+        features: [
+          sentences[2]?.trim().slice(0, 30) || `${topic}的实际应用`,
+          '结合项目实战',
+          '解决实际问题',
+        ],
+        suitableFor: '从业实践者',
+      },
+    ];
+  }
+
+  /**
+   * 生成手写批注
+   */
+  private generateHandwrittenNote(topic: string, knowledge: any): string {
+    const notes: Record<string, string> = {
+      '人工智能': '别只关注模型参数，理解数据质量才是关键。',
+      '量子计算': '经典计算机不会消失，量子计算是补充不是替代。',
+      '区块链': '技术本身中性，关键看应用场景和治理机制。',
+      '睡眠': '规律作息比睡够8小时更重要。',
+      '丝绸之路': '不只是贸易之路，更是文明对话的桥梁。',
+      '敦煌': '每一幅壁画背后都有千年的故事。',
+    };
+    return notes[topic] || `理解${topic}的本质比记忆细节更重要。`;
+  }
+
+  /**
+   * 生成金句
+   */
+  private generateQuote(topic: string, knowledge: any): string {
+    const quotes: Record<string, string> = {
+      '人工智能': '工具是助手，创意和判断永远在人手里。',
+      '量子计算': '不确定性不是缺陷，而是量子的力量来源。',
+      '区块链': '信任的代价可以被技术降低，但不能被替代。',
+      '睡眠': '好的睡眠不是浪费时间，而是在投资明天。',
+      '丝绸之路': '连接产生价值，交流催生文明。',
+      '敦煌': '沙漠中的艺术宝库，千年不灭的文化灯塔。',
+      '长城': '不是隔离的墙，而是对话的桥。',
+    };
+    return quotes[topic] || `真正理解${topic}，才能用好${topic}。`;
   }
 
   /**

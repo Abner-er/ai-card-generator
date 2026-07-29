@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import type { CardTemplate, CardContent, AIImageConfig, AITextConfig, AIGeneratedContent, WorkflowStep, ContentSection } from './types';
+import type { CardTemplate, CardContent, AIImageConfig, AITextConfig, AIGeneratedContent, WorkflowStep, ContentSection, KnowledgeModule, ProcessStep } from './types';
 import { templates } from './templates';
 import { ImageGenerationService } from './services/imageService';
 import { ContentGenerationService } from './services/contentService';
@@ -7,6 +7,7 @@ import { PromptBuilder } from './services/promptBuilder';
 import { ExportService } from './services/exportService';
 import { CardRenderer } from './components/CardRenderer';
 import { RichCardRenderer } from './components/RichCardRenderer';
+import { KnowledgeCardRenderer } from './components/KnowledgeCardRenderer';
 
 const EMPTY_CONTENT: CardContent = {
   title: '', subtitle: '', body: '', footer: '', tags: [],
@@ -86,6 +87,18 @@ const App: React.FC = () => {
         sections: result.sections,
         highlights: result.highlights,
         chapter: result.chapter,
+        // 知识卡片结构化内容
+        seriesName: result.seriesName,
+        episode: result.episode,
+        totalEpisodes: result.totalEpisodes,
+        topicNumber: result.topicNumber,
+        englishSubtitle: result.englishSubtitle,
+        definition: result.definition,
+        modules: result.modules,
+        processSteps: result.processSteps,
+        compareItems: result.compareItems,
+        handwrittenNote: result.handwrittenNote,
+        quote: result.quote,
       });
 
       // 设置AI生成的图片提示词
@@ -417,6 +430,115 @@ const App: React.FC = () => {
                 </div>
               )}
 
+              {/* ===== 知识卡片专用编辑 ===== */}
+              {selectedTemplate.renderer === 'knowledge' && (
+                <>
+                  {/* 系列信息 */}
+                  <div className="mb-3 grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">系列名称</label>
+                      <input type="text" className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs"
+                        value={content.seriesName || ''} onChange={e => setContent({ ...content, seriesName: e.target.value })} />
+                    </div>
+                    <div className="flex gap-2">
+                      <div className="flex-1">
+                        <label className="block text-xs font-medium text-gray-600 mb-1">期号</label>
+                        <input type="text" className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs"
+                          value={content.episode || ''} onChange={e => setContent({ ...content, episode: e.target.value })} />
+                      </div>
+                      <div className="flex-1">
+                        <label className="block text-xs font-medium text-gray-600 mb-1">编号</label>
+                        <input type="text" className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs"
+                          value={content.topicNumber || ''} onChange={e => setContent({ ...content, topicNumber: e.target.value })} />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 英文副标题 */}
+                  <Field label="英文副标题" value={content.englishSubtitle || ''} onChange={v => setContent({ ...content, englishSubtitle: v })} />
+
+                  {/* 概念定义 */}
+                  <Field label="概念定义" value={content.definition || ''} onChange={v => setContent({ ...content, definition: v })} multiline />
+
+                  {/* 知识模块编辑 */}
+                  {content.modules && content.modules.length > 0 && (
+                    <div className="mb-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="text-xs font-medium text-gray-600">知识模块（{content.modules.length}个）</label>
+                        <button onClick={() => {
+                          const newMod: KnowledgeModule = { id: `mod-${Date.now()}`, type: 'tip', title: '新模块', content: '', icon: '📌' };
+                          setContent({ ...content, modules: [...(content.modules || []), newMod] });
+                        }} className="text-xs text-amber-600 hover:text-amber-700">+ 添加模块</button>
+                      </div>
+                      {content.modules.map((mod, i) => (
+                        <div key={mod.id} className="mb-2 p-2 bg-gray-50 rounded-lg border border-gray-200">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <input type="text" className="w-10 px-1 py-1 border border-gray-300 rounded text-xs text-center"
+                              value={mod.icon || ''} onChange={e => {
+                                const modules = [...(content.modules || [])];
+                                modules[i] = { ...mod, icon: e.target.value };
+                                setContent({ ...content, modules });
+                              }} placeholder="图标" />
+                            <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
+                              value={mod.title} onChange={e => {
+                                const modules = [...(content.modules || [])];
+                                modules[i] = { ...mod, title: e.target.value };
+                                setContent({ ...content, modules });
+                              }} placeholder="模块标题" />
+                            <button onClick={() => {
+                              const modules = (content.modules || []).filter((_, j) => j !== i);
+                              setContent({ ...content, modules });
+                            }} className="text-xs text-red-400 hover:text-red-600 px-1">✕</button>
+                          </div>
+                          {mod.bullets && mod.bullets.length > 0 ? (
+                            <div className="space-y-1">
+                              {mod.bullets.map((b, j) => (
+                                <div key={j} className="flex items-center gap-1">
+                                  <span className="text-xs text-gray-400">•</span>
+                                  <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
+                                    value={b} onChange={e => {
+                                      const modules = [...(content.modules || [])];
+                                      const bullets = [...(mod.bullets || [])];
+                                      bullets[j] = e.target.value;
+                                      modules[i] = { ...mod, bullets };
+                                      setContent({ ...content, modules });
+                                    }} />
+                                  <button onClick={() => {
+                                    const modules = [...(content.modules || [])];
+                                    const bullets = (mod.bullets || []).filter((_, k) => k !== j);
+                                    modules[i] = { ...mod, bullets };
+                                    setContent({ ...content, modules });
+                                  }} className="text-xs text-red-400 hover:text-red-600">✕</button>
+                                </div>
+                              ))}
+                              <button onClick={() => {
+                                const modules = [...(content.modules || [])];
+                                const bullets = [...(mod.bullets || []), ''];
+                                modules[i] = { ...mod, bullets };
+                                setContent({ ...content, modules });
+                              }} className="text-xs text-blue-400 hover:text-blue-600">+ 要点</button>
+                            </div>
+                          ) : (
+                            <textarea className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs resize-y" rows={2}
+                              value={mod.content} onChange={e => {
+                                const modules = [...(content.modules || [])];
+                                modules[i] = { ...mod, content: e.target.value };
+                                setContent({ ...content, modules });
+                              }} placeholder="模块内容" />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* 手写批注 */}
+                  <Field label="手写批注" value={content.handwrittenNote || ''} onChange={v => setContent({ ...content, handwrittenNote: v })} />
+
+                  {/* 金句 */}
+                  <Field label="底部金句" value={content.quote || ''} onChange={v => setContent({ ...content, quote: v })} multiline />
+                </>
+              )}
+
               {/* 提示词编辑面板 */}
               <div className="mb-3">
                 <button onClick={() => setShowPromptPanel(!showPromptPanel)}
@@ -531,7 +653,9 @@ const App: React.FC = () => {
               boxShadow: '0 10px 40px rgba(0,0,0,0.15)',
               borderRadius: 8, overflow: 'hidden',
             }}>
-              {selectedTemplate.renderer === 'html' ? (
+              {selectedTemplate.renderer === 'knowledge' ? (
+                <KnowledgeCardRenderer template={selectedTemplate} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />
+              ) : selectedTemplate.renderer === 'html' ? (
                 <RichCardRenderer template={selectedTemplate} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />
               ) : (
                 <CardRenderer template={selectedTemplate} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />
