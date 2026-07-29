@@ -90,8 +90,31 @@ export interface AIImageConfig {
   mode: 'fast' | 'quality';
 }
 
+/** AI文本生成服务配置 */
+export interface AITextConfig {
+  provider: 'mock' | 'qianwen' | 'deepseek' | 'zhipu';
+  apiKey?: string;
+  /** 模型名称 */
+  model?: string;
+}
+
+/** AI生成的内容结果 */
+export interface AIGeneratedContent {
+  title: string;
+  subtitle: string;
+  body: string;
+  tags: string[];
+  /** AI生成的配图提示词（英文，用于图片生成） */
+  imagePrompt: string;
+  /** 知识点摘要，用于用户参考 */
+  summary: string;
+}
+
+/** 工作流步骤 */
+export type WorkflowStep = 'input' | 'generating-content' | 'review-content' | 'generating-image' | 'done';
+
 /** 生成状态 */
-export type GenerationStatus = 'idle' | 'generating-prompt' | 'generating-image' | 'rendering' | 'done' | 'error';
+export type GenerationStatus = 'idle' | 'generating-content' | 'generating-prompt' | 'generating-image' | 'rendering' | 'done' | 'error';
 
 /** 生成结果 */
 export interface GenerationResult {
