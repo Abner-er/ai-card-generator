@@ -1,11 +1,12 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import type { CardTemplate, CardContent, AIImageConfig, AITextConfig, AIGeneratedContent, WorkflowStep } from './types';
+import type { CardTemplate, CardContent, AIImageConfig, AITextConfig, AIGeneratedContent, WorkflowStep, ContentSection } from './types';
 import { templates } from './templates';
 import { ImageGenerationService } from './services/imageService';
 import { ContentGenerationService } from './services/contentService';
 import { PromptBuilder } from './services/promptBuilder';
 import { ExportService } from './services/exportService';
 import { CardRenderer } from './components/CardRenderer';
+import { RichCardRenderer } from './components/RichCardRenderer';
 
 const EMPTY_CONTENT: CardContent = {
   title: '', subtitle: '', body: '', footer: '', tags: [],
@@ -82,6 +83,9 @@ const App: React.FC = () => {
         body: result.body,
         footer: `知识卡片 · ${new Date().toLocaleDateString('zh-CN')}`,
         tags: result.tags,
+        sections: result.sections,
+        highlights: result.highlights,
+        chapter: result.chapter,
       });
 
       // 设置AI生成的图片提示词
@@ -107,7 +111,7 @@ const App: React.FC = () => {
     try {
       imageServiceRef.current.updateConfig({ ...imageConfig, apiKey });
 
-      const imageLayer = selectedTemplate.layers.find(l => l.type === 'image');
+      const imageLayer = selectedTemplate.layers?.find(l => l.type === 'image');
       const imgWidth = imageLayer?.width || 1080;
       const imgHeight = imageLayer?.height || 900;
 
@@ -277,8 +281,20 @@ const App: React.FC = () => {
                       <span className="font-medium text-sm text-gray-800">{tpl.name}</span>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
                         tpl.category === 'guofeng' ? 'bg-yellow-100 text-yellow-700' :
-                        tpl.category === 'modern' ? 'bg-blue-100 text-blue-700' : 'bg-green-100 text-green-700'
-                      }`}>{tpl.category === 'guofeng' ? '国风' : tpl.category === 'modern' ? '科技' : '简约'}</span>
+                        tpl.category === 'modern' ? 'bg-blue-100 text-blue-700' :
+                        tpl.category === 'minimal' ? 'bg-green-100 text-green-700' :
+                        tpl.category === 'scroll' ? 'bg-orange-100 text-orange-700' :
+                        tpl.category === 'handcraft' ? 'bg-pink-100 text-pink-700' :
+                        tpl.category === 'tech' ? 'bg-purple-100 text-purple-700' :
+                        'bg-teal-100 text-teal-700'
+                      }`}>{
+                        tpl.category === 'guofeng' ? '国风' :
+                        tpl.category === 'modern' ? '科技' :
+                        tpl.category === 'minimal' ? '简约' :
+                        tpl.category === 'scroll' ? '卷轴' :
+                        tpl.category === 'handcraft' ? '手账' :
+                        tpl.category === 'tech' ? '信息图' : '自然'
+                      }</span>
                     </div>
                   </button>
                 ))}
@@ -338,6 +354,68 @@ const App: React.FC = () => {
               <Field label="副标题" value={content.subtitle} onChange={v => setContent({ ...content, subtitle: v })} />
               <Field label="正文" value={content.body} onChange={v => setContent({ ...content, body: v })} multiline />
               <Field label="底部信息" value={content.footer} onChange={v => setContent({ ...content, footer: v })} />
+
+              {/* 多区块内容编辑（富文本模板） */}
+              {content.sections && content.sections.length > 0 && (
+                <div className="mb-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs font-medium text-gray-600">内容区块（{content.sections.length}个）</label>
+                    <button onClick={() => {
+                      const newSection: ContentSection = { id: `sec-${Date.now()}`, title: '新区块', body: '', icon: '📌' };
+                      setContent({ ...content, sections: [...(content.sections || []), newSection] });
+                    }} className="text-xs text-amber-600 hover:text-amber-700">+ 添加区块</button>
+                  </div>
+                  {content.sections.map((sec, i) => (
+                    <div key={sec.id} className="mb-2 p-2 bg-gray-50 rounded-lg border border-gray-200">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
+                          value={sec.title} onChange={e => {
+                            const sections = [...(content.sections || [])];
+                            sections[i] = { ...sec, title: e.target.value };
+                            setContent({ ...content, sections });
+                          }} placeholder="区块标题" />
+                        <input type="text" className="w-12 px-1 py-1 border border-gray-300 rounded text-xs text-center"
+                          value={sec.icon || ''} onChange={e => {
+                            const sections = [...(content.sections || [])];
+                            sections[i] = { ...sec, icon: e.target.value };
+                            setContent({ ...content, sections });
+                          }} placeholder="图标" />
+                        <button onClick={() => {
+                          const sections = (content.sections || []).filter((_, j) => j !== i);
+                          setContent({ ...content, sections });
+                        }} className="text-xs text-red-400 hover:text-red-600 px-1">✕</button>
+                      </div>
+                      <textarea className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs resize-y" rows={2}
+                        value={sec.body} onChange={e => {
+                          const sections = [...(content.sections || [])];
+                          sections[i] = { ...sec, body: e.target.value };
+                          setContent({ ...content, sections });
+                        }} placeholder="区块内容" />
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* 要点列表编辑 */}
+              {content.highlights && content.highlights.length > 0 && (
+                <div className="mb-3">
+                  <label className="block text-xs font-medium text-gray-600 mb-1">要点列表</label>
+                  {content.highlights.map((h, i) => (
+                    <div key={i} className="flex items-center gap-1 mb-1">
+                      <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
+                        value={h} onChange={e => {
+                          const highlights = [...(content.highlights || [])];
+                          highlights[i] = e.target.value;
+                          setContent({ ...content, highlights });
+                        }} />
+                      <button onClick={() => {
+                        const highlights = (content.highlights || []).filter((_, j) => j !== i);
+                        setContent({ ...content, highlights });
+                      }} className="text-xs text-red-400 hover:text-red-600 px-1">✕</button>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {/* 提示词编辑面板 */}
               <div className="mb-3">
@@ -448,13 +526,17 @@ const App: React.FC = () => {
         <div ref={previewContainerRef} className="flex-1 flex items-center justify-center overflow-auto p-6"
           style={{ background: 'repeating-conic-gradient(#e5e5e5 0% 25%, #f5f5f5 0% 50%) 50% / 20px 20px' }}>
           <div style={{
-            width: selectedTemplate.canvas.width * previewScale,
-            height: selectedTemplate.canvas.height * previewScale,
-            boxShadow: '0 10px 40px rgba(0,0,0,0.15)',
-            borderRadius: 8, overflow: 'hidden',
-          }}>
-            <CardRenderer template={selectedTemplate} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />
-          </div>
+              width: selectedTemplate.canvas.width * previewScale,
+              height: selectedTemplate.canvas.height * previewScale,
+              boxShadow: '0 10px 40px rgba(0,0,0,0.15)',
+              borderRadius: 8, overflow: 'hidden',
+            }}>
+              {selectedTemplate.renderer === 'html' ? (
+                <RichCardRenderer template={selectedTemplate} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />
+              ) : (
+                <CardRenderer template={selectedTemplate} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />
+              )}
+            </div>
         </div>
 
         <div className="px-6 py-2 bg-white border-t border-gray-200 flex items-center justify-between text-xs text-gray-500">

@@ -1,4 +1,4 @@
-import type { AITextConfig, AIGeneratedContent, CardTemplate } from '../types';
+import type { AITextConfig, AIGeneratedContent, CardTemplate, ContentSection } from '../types';
 
 /**
  * AI内容生成服务
@@ -40,6 +40,12 @@ export class ContentGenerationService {
     const knowledge = this.searchKnowledgeBase(topic);
     const imagePrompt = this.buildImagePrompt(topic, knowledge, template);
 
+    // 如果是富文本模板，生成多区块结构化内容
+    const isRichTemplate = template?.renderer === 'html';
+    const sections = isRichTemplate ? this.generateSections(topic, knowledge, template) : undefined;
+    const highlights = isRichTemplate ? this.generateHighlights(knowledge) : undefined;
+    const chapter = isRichTemplate ? this.generateChapter(topic, template) : undefined;
+
     return {
       title: knowledge.title,
       subtitle: knowledge.subtitle,
@@ -47,7 +53,158 @@ export class ContentGenerationService {
       tags: knowledge.tags,
       imagePrompt,
       summary: knowledge.summary,
+      sections,
+      highlights,
+      chapter,
     };
+  }
+
+  /**
+   * 生成多区块内容（根据模板风格和主题）
+   */
+  private generateSections(topic: string, knowledge: any, template?: CardTemplate): ContentSection[] {
+    const templateId = template?.htmlTemplateId || '';
+
+    // 根据模板类型生成不同结构的区块
+    if (templateId === 'scroll-history') {
+      // 历史卷轴：时间线节点
+      return this.generateHistorySections(topic, knowledge);
+    }
+    if (templateId === 'handcraft-compare') {
+      // 手账对比：三栏对比
+      return this.generateCompareSections(topic, knowledge);
+    }
+    if (templateId === 'tech-infographic') {
+      // 科技信息图：功能模块
+      return this.generateTechSections(topic, knowledge);
+    }
+    if (templateId === 'nature-science') {
+      // 自然科普：特征卡片
+      return this.generateNatureSections(topic, knowledge);
+    }
+
+    // 默认：通用区块
+    return this.generateGenericSections(knowledge);
+  }
+
+  /**
+   * 历史卷轴风格区块
+   */
+  private generateHistorySections(topic: string, knowledge: any): ContentSection[] {
+    const body = knowledge.body || '';
+    // 将正文拆分为多个时间段
+    const sentences = body.split('。').filter((s: string) => s.trim());
+
+    const sections: ContentSection[] = [];
+    const titles = ['起源背景', '核心内容', '重要影响', '历史评价'];
+
+    sentences.slice(0, 4).forEach((sent: string, i: number) => {
+      sections.push({
+        id: `sec-${i}`,
+        index: i + 1,
+        title: titles[i] || `阶段${i + 1}`,
+        body: sent.trim() + '。',
+      });
+    });
+
+    // 如果不足4个，补充
+    while (sections.length < 3) {
+      sections.push({
+        id: `sec-${sections.length}`,
+        index: sections.length + 1,
+        title: titles[sections.length] || `阶段${sections.length + 1}`,
+        body: `${topic}的发展是一个持续的过程，每个阶段都有其独特的历史价值。`,
+      });
+    }
+
+    return sections;
+  }
+
+  /**
+   * 对比风格区块（三栏）
+   */
+  private generateCompareSections(topic: string, knowledge: any): ContentSection[] {
+    const tags = knowledge.tags || [];
+    const body = knowledge.body || '';
+
+    return [
+      {
+        id: 'sec-1',
+        title: '基本概念',
+        icon: '📊',
+        body: `${topic}的核心定义\n${body.slice(0, 40)}...`,
+      },
+      {
+        id: 'sec-2',
+        title: '关键特点',
+        icon: '⚖️',
+        body: tags.map((t: string) => t).join('\n') + '\n' + (knowledge.summary || '').slice(0, 40),
+      },
+      {
+        id: 'sec-3',
+        title: '应用价值',
+        icon: '❤️',
+        body: `实际意义\n${topic}在日常生活中有广泛的应用价值，值得深入了解。`,
+      },
+    ];
+  }
+
+  /**
+   * 科技信息图区块
+   */
+  private generateTechSections(topic: string, knowledge: any): ContentSection[] {
+    return [
+      { id: 'sec-1', title: '能做什么', icon: '🎯', body: `${topic}能够实现核心功能，提供高效解决方案。` },
+      { id: 'sec-2', title: '适合谁', icon: '👤', body: `适合对${topic}感兴趣的学习者和从业者。` },
+      { id: 'sec-3', title: '怎么用', icon: '📋', body: knowledge.body?.slice(0, 60) + '...' },
+      { id: 'sec-4', title: '建议', icon: '💡', body: `建议从基础概念入手，逐步深入${topic}的实践应用。` },
+    ];
+  }
+
+  /**
+   * 自然科普区块
+   */
+  private generateNatureSections(topic: string, knowledge: any): ContentSection[] {
+    return [
+      { id: 'sec-1', title: '小知识', body: knowledge.summary || `${topic}是一个值得了解的自然主题。` },
+      { id: 'sec-2', title: '观察要点', body: '注意观察其形态特征、生活习性和生存环境。' },
+      { id: 'sec-3', title: '外观特征', body: knowledge.body?.slice(0, 50) + '...' },
+    ];
+  }
+
+  /**
+   * 通用区块
+   */
+  private generateGenericSections(knowledge: any): ContentSection[] {
+    return [
+      { id: 'sec-1', title: '概述', body: knowledge.summary || knowledge.body?.slice(0, 60) },
+      { id: 'sec-2', title: '详情', body: knowledge.body || '' },
+    ];
+  }
+
+  /**
+   * 生成要点列表
+   */
+  private generateHighlights(knowledge: any): string[] {
+    const highlights: string[] = [];
+    if (knowledge.summary) highlights.push(knowledge.summary);
+    if (knowledge.tags) highlights.push(...knowledge.tags.slice(0, 3));
+    // 从正文提取关键句
+    const body = knowledge.body || '';
+    const sentences = body.split('。').filter((s: string) => s.trim());
+    if (sentences.length > 0) highlights.push(sentences[0].trim().slice(0, 30));
+    return highlights.slice(0, 4);
+  }
+
+  /**
+   * 生成章节编号
+   */
+  private generateChapter(topic: string, template?: CardTemplate): string {
+    const templateId = template?.htmlTemplateId || '';
+    if (templateId === 'scroll-history') return '第一章';
+    if (templateId === 'nature-science') return '01';
+    if (templateId === 'tech-infographic') return '01';
+    return '01';
   }
 
   /**

@@ -1,7 +1,8 @@
 import type { CardTemplate } from '../types';
+import { richTemplates } from './richTemplates';
 
 /**
- * 内置模板集合
+ * 内置模板集合（基础图层模板 + 富文本模板）
  */
 export const templates: CardTemplate[] = [
   // ==================== 国风知识卡片 ====================
@@ -23,6 +24,7 @@ export const templates: CardTemplate[] = [
       atmosphere: '柔和自然光，温暖色调，细腻笔触，淡雅色调',
       quality: '超高清，8K，细节丰富，大师级作品',
     },
+    renderer: 'layer',
     layers: [
       // 背景图片层（AI生成）
       {
@@ -127,6 +129,7 @@ export const templates: CardTemplate[] = [
       atmosphere: '冷色调，蓝色和紫色霓虹光效，科技感强烈',
       quality: '超高清，8K，细节丰富，锐利',
     },
+    renderer: 'layer',
     layers: [
       // 背景图片层
       {
@@ -240,6 +243,7 @@ export const templates: CardTemplate[] = [
       atmosphere: '温暖柔和的色调，明亮通透，清新自然',
       quality: '高清，4K，色彩柔和，构图干净',
     },
+    renderer: 'layer',
     layers: [
       // 插画区域
       {
@@ -343,3 +347,6 @@ export const templates: CardTemplate[] = [
 export function getTemplateById(id: string): CardTemplate | undefined {
   return templates.find((t) => t.id === id);
 }
+
+// 追加富文本模板
+templates.push(...richTemplates);

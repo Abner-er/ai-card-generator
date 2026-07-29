@@ -8,7 +8,7 @@ interface CardRendererProps {
   /** 缩放比例（用于预览） */
   scale?: number;
   /** 用于截图的ref */
-  innerRef?: React.RefObject<HTMLDivElement>;
+  innerRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 /**
@@ -55,6 +55,7 @@ export const CardRenderer: React.FC<CardRendererProps> = ({
   innerRef,
 }) => {
   const { canvas, layers } = template;
+  const safeLayers = layers || [];
 
   // 替换模板中的占位符
   const replacePlaceholders = (text: string): string => {
@@ -196,7 +197,7 @@ export const CardRenderer: React.FC<CardRendererProps> = ({
         transformOrigin: 'top left',
       }}
     >
-      {layers.map((layer, index) => renderLayer(layer, index))}
+      {safeLayers.map((layer, index) => renderLayer(layer, index))}
     </div>
   );
 };

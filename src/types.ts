@@ -2,6 +2,20 @@
  * AI知识卡片生成系统 - 核心类型定义
  */
 
+/** 内容区块（用于复杂模板的多段内容） */
+export interface ContentSection {
+  /** 区块ID */
+  id: string;
+  /** 区块标题 */
+  title: string;
+  /** 区块正文 */
+  body: string;
+  /** 图标标识（emoji或关键词） */
+  icon?: string;
+  /** 序号 */
+  index?: number;
+}
+
 /** 卡片内容数据 */
 export interface CardContent {
   /** 主标题 */
@@ -14,6 +28,12 @@ export interface CardContent {
   footer: string;
   /** 标签列表 */
   tags: string[];
+  /** 多区块内容（复杂模板使用） */
+  sections?: ContentSection[];
+  /** 要点列表（底部总结用） */
+  highlights?: string[];
+  /** 章节编号（如"01"、"第四章"） */
+  chapter?: string;
 }
 
 /** AI图片生成提示词配置 */
@@ -32,6 +52,30 @@ export interface PromptConfig {
   quality: string;
 }
 
+/** 渲染器类型 */
+export type RendererType = 'layer' | 'html';
+
+/** 卡片模板配置 */
+export interface CardTemplate {
+  id: string;
+  name: string;
+  description: string;
+  category: 'guofeng' | 'modern' | 'minimal' | 'scroll' | 'handcraft' | 'tech' | 'nature';
+  canvas: {
+    width: number;
+    height: number;
+    backgroundColor: string;
+  };
+  /** AI图片生成提示词模板 */
+  promptTemplate: PromptConfig;
+  /** 渲染器类型：layer=绝对定位图层，html=HTML/CSS模板 */
+  renderer: RendererType;
+  /** 图层列表（layer渲染器使用，从下到上渲染） */
+  layers?: TemplateLayer[];
+  /** HTML模板ID（html渲染器使用，对应RichCardRenderer中的组件） */
+  htmlTemplateId?: string;
+}
+
 /** 模板图层类型 */
 export type LayerType = 'image' | 'text' | 'box' | 'tag';
 
@@ -43,10 +87,8 @@ export interface TemplateLayer {
   y: number;
   width: number;
   height: number;
-  // 图片层
   source?: 'ai-generated' | 'static';
   promptSlot?: string;
-  // 文字层
   content?: string;
   align?: 'left' | 'center' | 'right';
   fontFamily?: string;
@@ -55,7 +97,6 @@ export interface TemplateLayer {
   color?: string;
   lineHeight?: number;
   letterSpacing?: string;
-  // 盒子层
   background?: string;
   borderRadius?: number;
   border?: string;
@@ -63,30 +104,11 @@ export interface TemplateLayer {
   backdropFilter?: string;
 }
 
-/** 卡片模板配置 */
-export interface CardTemplate {
-  id: string;
-  name: string;
-  description: string;
-  category: 'guofeng' | 'modern' | 'minimal';
-  canvas: {
-    width: number;
-    height: number;
-    backgroundColor: string;
-  };
-  /** AI图片生成提示词模板 */
-  promptTemplate: PromptConfig;
-  /** 图层列表（从下到上渲染） */
-  layers: TemplateLayer[];
-}
-
 /** AI图片生成服务配置 */
 export interface AIImageConfig {
   provider: 'mock' | 'tongyi' | 'wenxin';
   apiKey?: string;
-  /** 图片尺寸 */
   size: string;
-  /** 生成模式 */
   mode: 'fast' | 'quality';
 }
 
@@ -94,7 +116,6 @@ export interface AIImageConfig {
 export interface AITextConfig {
   provider: 'mock' | 'qianwen' | 'deepseek' | 'zhipu';
   apiKey?: string;
-  /** 模型名称 */
   model?: string;
 }
 
@@ -108,6 +129,12 @@ export interface AIGeneratedContent {
   imagePrompt: string;
   /** 知识点摘要，用于用户参考 */
   summary: string;
+  /** 多区块内容（复杂模板使用） */
+  sections?: ContentSection[];
+  /** 要点列表 */
+  highlights?: string[];
+  /** 章节编号 */
+  chapter?: string;
 }
 
 /** 工作流步骤 */
