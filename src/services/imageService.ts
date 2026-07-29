@@ -37,7 +37,6 @@ export class ImageGenerationService {
   private async generateMock(prompt: string, width: number, height: number): Promise<string> {
     const { bgColor1, bgColor2, accentColor, accentColor2 } = this.inferColors(prompt);
 
-    // 根据提示词风格生成不同的装饰图案
     const decorations = this.generateDecorations(prompt, width, height, accentColor, accentColor2);
 
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
@@ -72,7 +71,6 @@ export class ImageGenerationService {
    * 根据提示词风格生成装饰图案
    */
   private generateDecorations(prompt: string, width: number, height: number, accent: string, accent2: string): string {
-    // 国风：水墨、花瓣、山水
     if (prompt.includes('工笔画') || prompt.includes('水墨') || prompt.includes('古画') || prompt.includes('宣纸') || prompt.includes('Chinese traditional')) {
       return `
         <circle cx="${width * 0.2}" cy="${height * 0.3}" r="${height * 0.12}" fill="${accent}" opacity="0.06" filter="url(#blur)" />
@@ -81,7 +79,6 @@ export class ImageGenerationService {
         <circle cx="${width * 0.5}" cy="${height * 0.25}" r="${height * 0.06}" fill="${accent2}" opacity="0.1" filter="url(#blur)" />
       `;
     }
-    // 科技：网格、粒子、光束
     if (prompt.includes('科技') || prompt.includes('霓虹') || prompt.includes('赛博') || prompt.includes('futuristic') || prompt.includes('dark')) {
       return `
         <circle cx="${width * 0.3}" cy="${height * 0.35}" r="${height * 0.15}" fill="${accent}" opacity="0.12" filter="url(#blur)" />
@@ -91,7 +88,6 @@ export class ImageGenerationService {
         ${this.generateParticles(width, height, accent, 15)}
       `;
     }
-    // 简约/清新：柔和几何形状
     if (prompt.includes('清新') || prompt.includes('自然') || prompt.includes('柔和') || prompt.includes('minimal') || prompt.includes('illustration')) {
       return `
         <circle cx="${width * 0.25}" cy="${height * 0.35}" r="${height * 0.14}" fill="${accent}" opacity="0.1" filter="url(#blur)" />
@@ -100,7 +96,6 @@ export class ImageGenerationService {
         <circle cx="${width * 0.85}" cy="${height * 0.25}" r="${height * 0.04}" fill="${accent2}" opacity="0.12" />
       `;
     }
-    // 默认：通用装饰
     return `
       <circle cx="${width * 0.3}" cy="${height * 0.35}" r="${height * 0.15}" fill="${accent}" opacity="0.08" filter="url(#blur)" />
       <circle cx="${width * 0.7}" cy="${height * 0.6}" r="${height * 0.2}" fill="${accent2}" opacity="0.06" filter="url(#blur)" />
@@ -136,33 +131,96 @@ export class ImageGenerationService {
     if (prompt.includes('清新') || prompt.includes('自然') || prompt.includes('柔和') || prompt.includes('minimal') || prompt.includes('pastel')) {
       return { bgColor1: '#f0e6d6', bgColor2: '#e8d5c4', accentColor: '#e8a87c', accentColor2: '#c4b5a0' };
     }
-    // 默认
     return { bgColor1: '#f5f0e6', bgColor2: '#e8dcc8', accentColor: '#8b4513', accentColor2: '#c97b3c' };
   }
 
   /**
-   * 通义万相API调用
-   * 文档：https://help.aliyun.com/document_detail/470012.html
+   * 通义万相API调用（DashScope原生API，异步模式）
+   * 文档：https://help.aliyun.com/zh/model-studio/text-to-image-api-reference
+   *
+   * 调用流程：
+   * 1. POST /api/v1/services/aigc/text2image/image-synthesis 创建任务 → 获取 task_id
+   * 2. GET /api/v1/tasks/{task_id} 轮询查询结果 → 获取图片URL
    */
   private async generateWithTongyi(promptConfig: PromptConfig, content: CardContent): Promise<string> {
-    const params = PromptBuilder.buildForTongyi(promptConfig, content);
+    const { prompt, negative_prompt } = PromptBuilder.buildForTongyi(promptConfig, content);
 
-    // 注意：实际使用时需要后端代理调用，避免API Key暴露在前端
-    const response = await fetch('/api/generate-image/tongyi', {
+    // ===== 步骤1：创建异步任务 =====
+    const createResponse = await fetch('/api/generate-image/tongyi', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.config.apiKey}`,
+        'X-DashScope-Async': 'enable', // HTTP调用必须设置为异步
+      },
       body: JSON.stringify({
-        ...params,
-        apiKey: this.config.apiKey,
+        model: 'wanx-v1',
+        input: {
+          prompt,
+          negative_prompt,
+        },
+        parameters: {
+          style: '<auto>',
+          size: '1024*1024',
+          n: 1,
+        },
       }),
     });
 
-    if (!response.ok) {
-      throw new Error(`通义万相API调用失败: ${response.status}`);
+    if (!createResponse.ok) {
+      const errText = await createResponse.text().catch(() => '');
+      throw new Error(`通义万相API创建任务失败: ${createResponse.status} ${errText}`);
     }
 
-    const data = await response.json();
-    return data.output?.results?.[0]?.url || data.data?.[0]?.url;
+    const createData = await createResponse.json();
+    const taskId = createData.output?.task_id;
+
+    if (!taskId) {
+      throw new Error(`通义万相API未返回task_id: ${JSON.stringify(createData)}`);
+    }
+
+    // ===== 步骤2：轮询查询任务结果 =====
+    const maxRetries = 30; // 最多轮询30次
+    const intervalMs = 2000; // 每2秒查询一次
+
+    for (let i = 0; i < maxRetries; i++) {
+      await this.delay(intervalMs);
+
+      const queryResponse = await fetch(`/api/generate-image/tongyi/query?task_id=${taskId}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${this.config.apiKey}`,
+        },
+      });
+
+      if (!queryResponse.ok) {
+        continue; // 查询失败则继续轮询
+      }
+
+      const queryData = await queryResponse.json();
+      const taskStatus = queryData.output?.task_status;
+
+      if (taskStatus === 'SUCCEEDED') {
+        const imageUrl = queryData.output?.results?.[0]?.url;
+        if (imageUrl) {
+          return imageUrl;
+        }
+        throw new Error('通义万相API返回结果中未找到图片URL');
+      }
+
+      if (taskStatus === 'FAILED') {
+        const message = queryData.message || queryData.output?.message || '未知错误';
+        throw new Error(`通义万相图片生成失败: ${message}`);
+      }
+
+      if (taskStatus === 'CANCELED') {
+        throw new Error('通义万相图片生成任务已取消');
+      }
+
+      // PENDING / RUNNING 继续轮询
+    }
+
+    throw new Error('通义万相图片生成超时，请稍后重试');
   }
 
   /**
@@ -194,5 +252,12 @@ export class ImageGenerationService {
    */
   updateConfig(config: Partial<AIImageConfig>) {
     this.config = { ...this.config, ...config };
+  }
+
+  /**
+   * 延迟辅助函数
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 }
