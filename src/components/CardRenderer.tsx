@@ -12,6 +12,38 @@ interface CardRendererProps {
 }
 
 /**
+ * 判断颜色是否为浅色（需要文字阴影）
+ * 解析 hex / rgba 格式
+ */
+function isLightColor(color: string): boolean {
+  let r = 255, g = 255, b = 255;
+
+  if (color.startsWith('#')) {
+    const hex = color.slice(1);
+    if (hex.length === 6) {
+      r = parseInt(hex.slice(0, 2), 16);
+      g = parseInt(hex.slice(2, 4), 16);
+      b = parseInt(hex.slice(4, 6), 16);
+    } else if (hex.length === 3) {
+      r = parseInt(hex[0] + hex[0], 16);
+      g = parseInt(hex[1] + hex[1], 16);
+      b = parseInt(hex[2] + hex[2], 16);
+    }
+  } else if (color.startsWith('rgba') || color.startsWith('rgb')) {
+    const match = color.match(/\d+/g);
+    if (match) {
+      r = parseInt(match[0]);
+      g = parseInt(match[1]);
+      b = parseInt(match[2]);
+    }
+  }
+
+  // 相对亮度公式
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.6;
+}
+
+/**
  * 卡片渲染器组件
  * 根据模板配置和内容数据，渲染出精确排版的卡片
  */
@@ -50,33 +82,37 @@ export const CardRenderer: React.FC<CardRendererProps> = ({
         return (
           <div
             key={layer.id || index}
-          style={{
-            ...baseStyle,
-            backgroundImage: imageUrl ? `url(${imageUrl})` : undefined,
-            backgroundColor: !imageUrl ? '#e0e0e0' : undefined,
-            backgroundSize: 'cover',
-            backgroundPosition: 'center',
-            backgroundRepeat: 'no-repeat',
-          }}
-        >
-          {!imageUrl && (
-            <div style={{
-              width: '100%',
-              height: '100%',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#999',
-              fontSize: 14,
-              background: 'repeating-linear-gradient(45deg, #eee, #eee 10px, #e5e5e5 10px, #e5e5e5 20px)',
-            }}>
-              AI配图区域
-            </div>
-          )}
+            style={{
+              ...baseStyle,
+              backgroundImage: imageUrl ? `url(${imageUrl})` : undefined,
+              backgroundColor: !imageUrl ? '#e8e8e8' : undefined,
+              backgroundSize: 'cover',
+              backgroundPosition: 'center',
+              backgroundRepeat: 'no-repeat',
+            }}
+          >
+            {!imageUrl && (
+              <div style={{
+                width: '100%',
+                height: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#aaa',
+                fontSize: 16,
+                background: 'repeating-linear-gradient(45deg, #f0f0f0, #f0f0f0 12px, #e8e8e8 12px, #e8e8e8 24px)',
+              }}>
+                AI配图区域
+              </div>
+            )}
           </div>
         );
 
       case 'text':
+        // 浅色文字需要阴影增强可读性
+        const textColor = layer.color || '#333';
+        const needsShadow = isLightColor(textColor);
+
         return (
           <div
             key={layer.id || index}
@@ -90,13 +126,14 @@ export const CardRenderer: React.FC<CardRendererProps> = ({
               fontFamily: layer.fontFamily || 'sans-serif',
               fontSize: layer.fontSize,
               fontWeight: layer.fontWeight,
-              color: layer.color,
+              color: textColor,
               lineHeight: layer.lineHeight || 1.5,
               letterSpacing: layer.letterSpacing,
               wordBreak: 'break-word',
               overflowWrap: 'break-word',
               whiteSpace: 'pre-wrap',
               overflow: 'hidden',
+              textShadow: needsShadow ? '0 1px 4px rgba(0,0,0,0.35)' : 'none',
             }}
           >
             {replacePlaceholders(layer.content || '')}

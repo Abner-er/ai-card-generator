@@ -151,10 +151,92 @@ export class ContentGenerationService {
         tags: ['健康', '睡眠', '科学'],
         summary: '睡眠分为REM和NREM周期，对记忆巩固和身体修复至关重要。',
       },
+      '运动': {
+        title: '科学运动指南',
+        subtitle: '让身体更高效地运转',
+        body: '规律运动能增强心肺功能、提高代谢率、改善心理状态。世界卫生组织建议成年人每周进行150分钟中等强度有氧运动或75分钟高强度运动。运动时心率达到最大心率的60-80%为最佳燃脂区间。运动后30分钟内补充蛋白质有助于肌肉恢复。',
+        tags: ['健康', '运动', '科学'],
+        summary: 'WHO建议每周150分钟中等强度运动，有助于心肺和代谢健康。',
+      },
+      '饮食': {
+        title: '均衡饮食的智慧',
+        subtitle: '吃对食物，吃出健康',
+        body: '均衡饮食是健康的基石。中国居民膳食指南建议：每天摄入12种以上食物，每周25种以上。谷物为主食，蔬菜水果每天各300-500克，适量摄入鱼禽蛋奶。减少盐（<5克/天）、油（25-30克/天）和糖的摄入。食物多样化、适量搭配是核心原则。',
+        tags: ['健康', '饮食', '营养'],
+        summary: '均衡饮食要求每天12种以上食物，谷物为主，少盐少油少糖。',
+      },
+    };
+
+    // 自然地理系列
+    const geography: Record<string, any> = {
+      '珠穆朗玛峰': {
+        title: '珠穆朗玛峰',
+        subtitle: '地球之巅的壮丽与挑战',
+        body: '珠穆朗玛峰海拔8848.86米，是世界最高峰，位于中国与尼泊尔边境。藏语中"珠穆"意为女神，"朗玛"意为母象。每年约有800人尝试登顶，但成功者不足一半。高海拔带来的缺氧、严寒和暴风雪是最大挑战。2020年中国测量队最新测得高度为8848.86米。',
+        tags: ['自然', '地理', '探索'],
+        summary: '珠穆朗玛峰海拔8848.86米，是世界最高峰，登顶成功率不足一半。',
+      },
+      '沙漠': {
+        title: '沙漠的奥秘',
+        subtitle: '干旱之地的生命奇迹',
+        body: '沙漠占地球陆地面积约33%。最大的沙漠是南极沙漠（约1400万平方公里），最大的热沙漠是撒哈拉沙漠（约900万平方公里）。沙漠昼夜温差可达40°C以上。仙人掌、骆驼等生物通过特殊适应机制在极端环境中生存。沙漠也是太阳能和风能的丰富来源。',
+        tags: ['自然', '地理', '生态'],
+        summary: '沙漠占陆地33%，昼夜温差大，生物有独特适应机制。',
+      },
+      '火山': {
+        title: '火山的力量',
+        subtitle: '地球内部的窗口',
+        body: '火山是地球内部岩浆喷发到地表的地质现象。全球约有1500座活火山，主要分布在环太平洋火山带。火山喷发虽具破坏性，但也形成肥沃土壤和地热资源。黄石超级火山是世界上最大的活火山之一，其火山口面积达2500平方公里。',
+        tags: ['自然', '地质', '地理'],
+        summary: '全球约1500座活火山，主要分布在环太平洋火山带。',
+      },
+    };
+
+    // 历史人文系列
+    const history: Record<string, any> = {
+      '丝绸之路': {
+        title: '丝绸之路',
+        subtitle: '连接东西方的千年古道',
+        body: '丝绸之路是古代连接亚欧大陆的贸易网络，全长约7000公里。始于汉代张骞出使西域（公元前138年），繁荣于唐代。不仅运输丝绸、瓷器、茶叶，更促进了佛教、伊斯兰教等文化和技术的传播。2014年，丝绸之路长安-天山廊道路网被列入世界文化遗产。',
+        tags: ['历史', '文化', '丝绸之路'],
+        summary: '丝绸之路始于汉代，全长约7000公里，是东西方文化与贸易的桥梁。',
+      },
+      '敦煌': {
+        title: '敦煌莫高窟',
+        subtitle: '沙漠中的艺术宝库',
+        body: '敦煌莫高窟始建于公元366年，历经十六国、北朝、隋唐等千年营造。现存洞窟735个，壁画45000平方米，彩塑2400余尊。飞天壁画是敦煌最具代表性的艺术形象。1900年发现的藏经洞出土了5万余件文献，催生了"敦煌学"。1987年列入世界文化遗产。',
+        tags: ['历史', '艺术', '敦煌'],
+        summary: '莫高窟始建于366年，有壁画45000平方米，是世界文化遗产。',
+      },
+      '长城': {
+        title: '万里长城',
+        subtitle: '中华文明的脊梁',
+        body: '长城是中国古代军事防御工程，东起山海关，西至嘉峪关，全长21196公里。秦朝连接各国长城形成统一防线，明朝进行了大规模重建。长城由城墙、烽火台、关隘等组成，是世界上最长的人造工程。1987年被列入世界文化遗产。',
+        tags: ['历史', '建筑', '长城'],
+        summary: '长城全长21196公里，是世界上最长的人造工程和世界文化遗产。',
+      },
+    };
+
+    // 艺术系列
+    const art: Record<string, any> = {
+      '国画': {
+        title: '中国画艺术',
+        subtitle: '水墨丹青中的东方美学',
+        body: '中国画以毛笔、水墨为主要工具，讲究"气韵生动"和"以形写神"。分为山水、花鸟、人物三大画科。工笔重彩细腻精致，写意水墨潇洒奔放。从顾恺之的《洛神赋图》到张大千的泼彩山水，中国画传承千年，形成了独特的审美体系。',
+        tags: ['艺术', '国画', '传统文化'],
+        summary: '中国画分山水、花鸟、人物三科，讲究气韵生动和以形写神。',
+      },
+      '京剧': {
+        title: '京剧艺术',
+        subtitle: '国粹的魅力与传承',
+        body: '京剧是中国最具影响力的戏曲剧种，形成于清代乾隆年间。生旦净丑四大行当各具特色，唱念做打四功并举。脸谱颜色寓意不同性格：红表忠勇、黑表刚直、白表奸诈。梅兰芳等大师将京剧推向世界。2010年京剧被列入联合国非物质文化遗产名录。',
+        tags: ['艺术', '京剧', '传统文化'],
+        summary: '京剧形成于清代，有生旦净丑四行当，是联合国非物质文化遗产。',
+      },
     };
 
     // 搜索匹配
-    const allKnowledge = { ...solarTerms, ...culture, ...tech, ...nature, ...health };
+    const allKnowledge = { ...solarTerms, ...culture, ...tech, ...nature, ...health, ...geography, ...history, ...art };
 
     // 精确匹配
     for (const key of Object.keys(allKnowledge)) {
@@ -221,6 +303,16 @@ export class ContentGenerationService {
       '深海': 'deep sea exploration, bioluminescent creatures, underwater scene, dark ocean',
       '极光': 'aurora borealis, northern lights, green and purple sky, snowy landscape',
       '睡眠': 'peaceful sleep, night sky, stars, crescent moon, dreaming',
+      '运动': 'athletic running, dynamic movement, energy, sports, fitness',
+      '饮食': 'healthy food, fresh vegetables, fruits, balanced meal, nutrition',
+      '珠穆朗玛峰': 'mount everest, snow peak, himalaya mountains, clouds, majestic summit',
+      '沙漠': 'desert landscape, sand dunes, oasis, camel, golden sand',
+      '火山': 'volcanic eruption, lava flow, smoke, dramatic sky, geological force',
+      '丝绸之路': 'silk road, ancient trade route, desert caravan, camels, sunset',
+      '敦煌': 'dunhuang mogao caves, ancient buddhist art, desert temple, flying apsaras',
+      '长城': 'great wall of china, ancient fortress, mountain ridge, misty landscape',
+      '国画': 'chinese painting, ink wash, mountain landscape, bamboo, traditional art',
+      '京剧': 'peking opera, chinese opera mask, stage performance, traditional costume',
     };
 
     for (const key of Object.keys(translations)) {

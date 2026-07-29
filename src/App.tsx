@@ -256,7 +256,7 @@ const App: React.FC = () => {
               <div className="mb-4">
                 <p className="text-xs text-gray-500 mb-2">试试这些主题：</p>
                 <div className="flex flex-wrap gap-1.5">
-                  {['立春', '雨水', '惊蛰', '茶文化', '书法', '人工智能', '量子计算', '区块链', '深海', '极光', '睡眠'].map(t => (
+                  {['立春', '雨水', '惊蛰', '茶文化', '书法', '人工智能', '量子计算', '区块链', '深海', '极光', '睡眠', '敦煌', '长城', '丝绸之路', '国画', '京剧', '火山'].map(t => (
                     <button key={t} onClick={() => setTopic(t)}
                       className="px-2.5 py-1 text-xs bg-gray-100 hover:bg-amber-100 hover:text-amber-700 rounded-full transition">
                       {t}
