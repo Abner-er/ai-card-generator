@@ -205,7 +205,9 @@ Return ONLY valid JSON, no markdown, no explanation:
 
     try {
       const response = await this.callTextAPI(systemPrompt, '');
+      console.log('[CardDesignService] AI response (first 200 chars):', response.substring(0, 200));
       const parsed = this.parseDesignJSON(response);
+      console.log('[CardDesignService] Parsed design:', parsed ? 'success' : 'failed', parsed?.html ? `html length: ${parsed.html.length}` : 'no html');
       if (parsed && parsed.html && parsed.colors) {
         return parsed;
       }
@@ -213,6 +215,7 @@ Return ONLY valid JSON, no markdown, no explanation:
       console.warn('[CardDesignService] Design generation failed:', err);
     }
 
+    console.warn('[CardDesignService] Using fallback design');
     // Fallback
     return this.generateFallbackDesign(content, layout, dominantColor, knowledge, imageUrl);
   }

@@ -343,6 +343,7 @@ const App: React.FC = () => {
             total,
             (s, sn) => { /* 进度由 designProgress 管理 */ },
           );
+          console.log(`[App] Card ${i + 1} design done, html length:`, design.html.length);
           updatedCards[i] = { ...card, design, designStatus: 'done', designError: undefined };
         } catch (err) {
           console.warn(`[App] Card ${i + 1} design failed:`, err);
