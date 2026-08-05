@@ -1,55 +1,73 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
-import type { CardTemplate, CardContent, AIImageConfig, AITextConfig, AIGeneratedContent, WorkflowStep, ContentSection, KnowledgeModule, ProcessStep } from './types';
-import { templates } from './templates';
-import { ImageGenerationService } from './services/imageService';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
+import type {
+  CardTemplate, CardContent, AIConfig, WorkflowStage,
+  KnowledgeBase, CardData, VisualPrompt, StylePreset,
+  KnowledgeModule, ContentSection, StageNumber,
+} from './types';
+import { templates, stylePresets, getTemplateById } from './templates';
+import { KnowledgeService } from './services/knowledgeService';
 import { ContentGenerationService } from './services/contentService';
+import { ImageGenerationService } from './services/imageService';
 import { PromptBuilder } from './services/promptBuilder';
 import { ExportService } from './services/exportService';
+import type { ExportCardParams } from './services/exportService';
+import { ProjectService } from './services/projectService';
 import { CardRenderer } from './components/CardRenderer';
 import { RichCardRenderer } from './components/RichCardRenderer';
 import { KnowledgeCardRenderer } from './components/KnowledgeCardRenderer';
+import { TemplatePreview } from './components/TemplatePreview';
+
+// 默认配置 — API Key 由服务端代理持有，不暴露给前端
+const DEFAULT_AI_CONFIG: AIConfig = {
+  baseURL: import.meta.env.VITE_API_BASE_URL || '/ai-api',
+  textModel: import.meta.env.VITE_TEXT_MODEL || 'agnes-2.5-flash',
+  imageModel: import.meta.env.VITE_IMAGE_MODEL || 'agnes-image-2.1-flash',
+  imageSize: import.meta.env.VITE_IMAGE_SIZE || '1024x1536',
+  imageRatio: '3:4',
+};
 
 const EMPTY_CONTENT: CardContent = {
   title: '', subtitle: '', body: '', footer: '', tags: [],
 };
 
-const DEFAULT_AI_IMAGE_CONFIG: AIImageConfig = {
-  provider: 'mock', size: '1024*1024', mode: 'fast',
-};
-
-const DEFAULT_AI_TEXT_CONFIG: AITextConfig = {
-  provider: 'mock',
-};
+// 五阶段定义
+const STAGES: { num: StageNumber; key: string; label: string; icon: string }[] = [
+  { num: 1, key: 'knowledge', label: '知识检索', icon: '🔍' },
+  { num: 2, key: 'content', label: '内容生成', icon: '✍️' },
+  { num: 3, key: 'prompt', label: 'Prompt工程', icon: '🎨' },
+  { num: 4, key: 'image', label: 'AI出图', icon: '🖼️' },
+  { num: 5, key: 'typeset', label: '排版导出', icon: '📐' },
+];
 
 const App: React.FC = () => {
-  // 工作流状态
-  const [step, setStep] = useState<WorkflowStep>('input');
+  // ===== 工作流状态 =====
+  const [stage, setStage] = useState<WorkflowStage>('input');
   const [topic, setTopic] = useState('');
 
-  // 模板与内容
+  // 模板与风格
   const [selectedTemplate, setSelectedTemplate] = useState<CardTemplate>(templates[0]);
-  const [content, setContent] = useState<CardContent>(EMPTY_CONTENT);
-  const [aiContent, setAiContent] = useState<AIGeneratedContent | null>(null);
+  const [selectedStylePreset, setSelectedStylePreset] = useState<StylePreset>(stylePresets[0]);
 
   // AI配置
-  const [imageConfig, setImageConfig] = useState<AIImageConfig>(DEFAULT_AI_IMAGE_CONFIG);
-  const [textConfig, setTextConfig] = useState<AITextConfig>(DEFAULT_AI_TEXT_CONFIG);
-  const [apiKey, setApiKey] = useState('');
-  const [textApiKey, setTextApiKey] = useState('');
+  const [aiConfig, setAiConfig] = useState<AIConfig>(DEFAULT_AI_CONFIG);
 
-  // 生成状态
-  const [imageUrl, setImageUrl] = useState('');
+  // 项目数据
+  const [knowledge, setKnowledge] = useState<KnowledgeBase | null>(null);
+  const [cards, setCards] = useState<CardData[]>([]);
+  const [activeCardIndex, setActiveCardIndex] = useState(0);
+
+  // UI状态
   const [status, setStatus] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [previewScale, setPreviewScale] = useState(0.35);
-  const [showPromptPanel, setShowPromptPanel] = useState(false);
-  const [editedPrompt, setEditedPrompt] = useState('');
+  const [imageProgress, setImageProgress] = useState({ current: 0, total: 0, msg: '' });
 
   // Refs
   const cardRef = useRef<HTMLDivElement>(null);
   const previewContainerRef = useRef<HTMLDivElement>(null);
-  const imageServiceRef = useRef(new ImageGenerationService(DEFAULT_AI_IMAGE_CONFIG));
-  const contentServiceRef = useRef(new ContentGenerationService(DEFAULT_AI_TEXT_CONFIG));
+  const knowledgeServiceRef = useRef(new KnowledgeService(DEFAULT_AI_CONFIG));
+  const contentServiceRef = useRef(new ContentGenerationService(DEFAULT_AI_CONFIG));
+  const imageServiceRef = useRef(new ImageGenerationService(DEFAULT_AI_CONFIG));
 
   // 自动计算缩放
   useEffect(() => {
@@ -57,7 +75,7 @@ const App: React.FC = () => {
       if (previewContainerRef.current) {
         const w = previewContainerRef.current.clientWidth - 48;
         const h = previewContainerRef.current.clientHeight - 48;
-        setPreviewScale(Math.min(w / selectedTemplate.canvas.width, h / selectedTemplate.canvas.height, 0.5));
+        setPreviewScale(Math.min(w / selectedTemplate.canvas.width, h / selectedTemplate.canvas.height, 1));
       }
     };
     calc();
@@ -65,96 +83,225 @@ const App: React.FC = () => {
     return () => window.removeEventListener('resize', calc);
   }, [selectedTemplate]);
 
-  // ===== 步骤1: AI生成内容 =====
-  const handleGenerateContent = useCallback(async () => {
-    if (!topic.trim()) { setErrorMsg('请输入主题'); return; }
+  // 初始化 PromptBuilder 的 AI 改写器
+  useEffect(() => {
+    PromptBuilder.configureRewriter({
+      baseURL: aiConfig.baseURL,
+      textModel: aiConfig.textModel,
+    });
+  }, [aiConfig.baseURL, aiConfig.textModel]);
 
-    setStep('generating-content');
-    setStatus('AI正在搜索知识并生成内容...');
+  // ===== 当前阶段编号 =====
+  const currentStageNum = useCallback((): StageNumber | 0 => {
+    const map: Record<string, StageNumber | 0> = {
+      'input': 0,
+      'generating-knowledge': 1, 'review-knowledge': 1,
+      'generating-content': 2, 'review-content': 2,
+      'generating-prompt': 3, 'review-prompt': 3,
+      'generating-image': 4, 'review-image': 4,
+      'typeset': 5, 'done': 5,
+    };
+    return map[stage] ?? 0;
+  }, [stage]);
+
+  // ===== 卡片数量（动态化）=====
+  // 对于系列模板（lifecycle/timeline/process），以知识库检索到的实际阶段数量为准
+  // 这样用户输入"知了的一生"时，若只有4个阶段，就只生成4张卡片
+  const templateDefaultCount = selectedTemplate.cardCount || 1;
+  const knowledgeSeriesCount = useMemo(() => {
+    if (!knowledge) return templateDefaultCount;
+    if (knowledge.lifecycleStages?.length) return knowledge.lifecycleStages.length;
+    if (knowledge.timelineEvents?.length) return knowledge.timelineEvents.length;
+    if (knowledge.processSteps?.length) return knowledge.processSteps.length;
+    return templateDefaultCount;
+  }, [knowledge, templateDefaultCount]);
+  const cardCount = knowledge ? knowledgeSeriesCount : templateDefaultCount;
+  const isSeries = cardCount > 1;
+
+  // ===== 当前活跃卡片 =====
+  const activeCard = cards[activeCardIndex];
+  const activeContent = activeCard?.content || EMPTY_CONTENT;
+  const activeImageUrl = activeCard?.imageUrl || '';
+
+  // ============================================================
+  // Stage 1: 知识检索
+  // ============================================================
+  const handleStart = useCallback(async () => {
+    if (!topic.trim()) { setErrorMsg('请输入主题'); return; }
+    setStage('generating-knowledge');
+    setStatus('AI正在检索知识...');
     setErrorMsg('');
 
     try {
-      contentServiceRef.current.updateConfig({ ...textConfig, apiKey: textApiKey });
-      const result = await contentServiceRef.current.generate(topic, selectedTemplate);
+      knowledgeServiceRef.current.updateConfig(aiConfig);
+      const result = await knowledgeServiceRef.current.retrieve(topic, selectedTemplate.id);
+      setKnowledge(result);
+      setStage('review-knowledge');
+      setStatus('知识检索完成，请审校知识数据');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : '知识检索失败');
+      setStage('input');
+      setStatus('');
+    }
+  }, [topic, selectedTemplate, aiConfig]);
 
-      setAiContent(result);
-      setContent({
-        title: result.title,
-        subtitle: result.subtitle,
-        body: result.body,
-        footer: `知识卡片 · ${new Date().toLocaleDateString('zh-CN')}`,
-        tags: result.tags,
-        sections: result.sections,
-        highlights: result.highlights,
-        chapter: result.chapter,
-        // 知识卡片结构化内容
-        seriesName: result.seriesName,
-        episode: result.episode,
-        totalEpisodes: result.totalEpisodes,
-        topicNumber: result.topicNumber,
-        englishSubtitle: result.englishSubtitle,
-        definition: result.definition,
-        modules: result.modules,
-        processSteps: result.processSteps,
-        compareItems: result.compareItems,
-        handwrittenNote: result.handwrittenNote,
-        quote: result.quote,
-      });
+  // ============================================================
+  // Stage 2: 内容生成（为所有卡片生成内容）
+  // ============================================================
+  const handleGenerateContent = useCallback(async () => {
+    if (!knowledge) return;
+    setStage('generating-content');
+    setStatus('正在为每张卡片生成内容...');
+    setErrorMsg('');
 
-      // 设置AI生成的图片提示词
-      setEditedPrompt(result.imagePrompt || PromptBuilder.build(selectedTemplate.promptTemplate, {
-        title: result.title, subtitle: result.subtitle, body: result.body, footer: '', tags: result.tags,
-      }));
+    try {
+      contentServiceRef.current.updateConfig(aiConfig);
+      const newCards: CardData[] = [];
 
-      setStep('review-content');
-      setStatus('内容已生成，请检查并编辑');
+      for (let i = 0; i < cardCount; i++) {
+        setStatus(`正在生成第${i + 1}/${cardCount}张卡片内容...`);
+        const content = await contentServiceRef.current.generate(knowledge, selectedTemplate, i);
+
+        // 生成卡片阶段标题
+        let cardStage = '';
+        let cardSubtitle = '';
+        if (knowledge.lifecycleStages?.[i]) {
+          cardStage = `${String(i + 1).padStart(2, '0')} ${knowledge.lifecycleStages[i].name}`;
+          cardSubtitle = knowledge.lifecycleStages[i].period;
+        } else if (knowledge.timelineEvents?.[i]) {
+          cardStage = knowledge.timelineEvents[i].title;
+          cardSubtitle = knowledge.timelineEvents[i].year;
+        } else if (knowledge.processSteps?.[i]) {
+          cardStage = `步骤${knowledge.processSteps[i].order}: ${knowledge.processSteps[i].title}`;
+          cardSubtitle = `第${knowledge.processSteps[i].order}步`;
+        } else {
+          cardStage = content.title;
+          cardSubtitle = content.subtitle;
+        }
+
+        newCards.push({
+          id: i + 1,
+          stage: cardStage,
+          subtitle: cardSubtitle,
+          knowledge,
+          content,
+        });
+      }
+
+      setCards(newCards);
+      setActiveCardIndex(0);
+      setStage('review-content');
+      setStatus('内容生成完成，请逐张审校');
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : '内容生成失败');
-      setStep('input');
+      setStage('review-knowledge');
       setStatus('');
     }
-  }, [topic, selectedTemplate, textConfig, textApiKey]);
+  }, [knowledge, selectedTemplate, cardCount, aiConfig]);
 
-  // ===== 步骤2: 生成AI底图 =====
-  const handleGenerateImage = useCallback(async () => {
-    setStep('generating-image');
-    setStatus('正在生成AI底图...');
+  // ============================================================
+  // Stage 3: Prompt工程（为所有卡片生成六段式Prompt）
+  // 启用大模型改写：每张卡片都让 AI 根据当前阶段内容改写 prompt，
+  // 避免出现与阶段冲突的元素（如成虫里出现蛋）
+  // ============================================================
+  const handleGeneratePrompts = useCallback(async () => {
+    if (!knowledge || cards.length === 0) return;
+    setStage('generating-prompt');
+    setStatus('AI正在为每张卡片改写生成式提示词...');
     setErrorMsg('');
 
     try {
-      imageServiceRef.current.updateConfig({ ...imageConfig, apiKey });
+      const updatedCards: CardData[] = [];
+      const total = cards.length;
 
-      const imageLayer = selectedTemplate.layers?.find(l => l.type === 'image');
-      const imgWidth = imageLayer?.width || 1080;
-      const imgHeight = imageLayer?.height || 900;
+      for (let idx = 0; idx < total; idx++) {
+        const card = cards[idx];
+        setStatus(`正在生成第 ${idx + 1}/${total} 张的AI改写Prompt...`);
 
-      // 使用用户编辑后的提示词（如果有）或AI生成的提示词
-      const { prompt: finalPrompt, negative } = PromptBuilder.rebuildFromEditedContent(
-        selectedTemplate.promptTemplate,
-        content,
-        selectedTemplate,
-        editedPrompt || aiContent?.imagePrompt
-      );
+        // 优先调用大模型改写 prompt，失败时自动 fallback 到模板版
+        const prompt = await PromptBuilder.buildVisualPromptAsync(
+          knowledge,
+          card.content!,
+          selectedTemplate,
+          selectedStylePreset,
+          idx,
+          total,
+        );
 
-      // 更新模板的提示词配置
-      const updatedConfig = {
-        ...selectedTemplate.promptTemplate,
-        subject: finalPrompt,
-        negative,
-      };
+        updatedCards.push({ ...card, prompt });
+      }
 
-      const url = await imageServiceRef.current.generate(updatedConfig, content, imgWidth, imgHeight);
-      setImageUrl(url);
-      setStep('done');
-      setStatus('底图生成完成，可导出图片');
+      setCards(updatedCards);
+      setStage('review-prompt');
+      setStatus('Prompt生成完成（已使用AI改写），请查看并可微调');
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : '图片生成失败');
-      setStep('review-content');
+      setErrorMsg(err instanceof Error ? err.message : 'Prompt生成失败');
+      setStage('review-content');
       setStatus('');
     }
-  }, [selectedTemplate, content, imageConfig, apiKey, editedPrompt, aiContent]);
+  }, [knowledge, cards, selectedTemplate, selectedStylePreset]);
 
-  // ===== 导出PNG =====
+  // ============================================================
+  // Stage 4: AI出图（为所有卡片生成图片，含限流）
+  // ============================================================
+  const handleGenerateImages = useCallback(async () => {
+    if (cards.length === 0) return;
+    setStage('generating-image');
+    setErrorMsg('');
+    setImageProgress({ current: 0, total: cards.length, msg: '开始生成图片...' });
+
+    try {
+      imageServiceRef.current.updateConfig(aiConfig);
+      const updatedCards = [...cards];
+
+      for (let i = 0; i < updatedCards.length; i++) {
+        if (!updatedCards[i].prompt) continue;
+        setImageProgress({ current: i + 1, total: cards.length, msg: `正在生成第${i + 1}/${cards.length}张图片...` });
+        setStatus(`正在生成第${i + 1}/${cards.length}张图片...`);
+
+        const url = await imageServiceRef.current.generateFromVisualPrompt(
+          updatedCards[i].prompt!,
+          (msg) => setImageProgress({ current: i + 1, total: cards.length, msg }),
+        );
+        updatedCards[i] = { ...updatedCards[i], imageUrl: url, imageStatus: 'done' };
+        setCards([...updatedCards]);
+      }
+
+      setStage('review-image');
+      setStatus('所有图片生成完成，请审校');
+      setImageProgress({ current: 0, total: 0, msg: '' });
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : '图片生成失败');
+      setStage('review-prompt');
+      setStatus('');
+      setImageProgress({ current: 0, total: 0, msg: '' });
+    }
+  }, [cards, aiConfig]);
+
+  // ===== 单张重新生成图片 =====
+  const handleRegenerateImage = useCallback(async (cardIndex: number) => {
+    if (!cards[cardIndex]?.prompt) return;
+    setStatus(`正在重新生成第${cardIndex + 1}张图片...`);
+    setErrorMsg('');
+    try {
+      imageServiceRef.current.updateConfig(aiConfig);
+      const url = await imageServiceRef.current.generateFromVisualPrompt(
+        cards[cardIndex].prompt!,
+        (msg) => setStatus(msg),
+      );
+      const updatedCards = [...cards];
+      updatedCards[cardIndex] = { ...updatedCards[cardIndex], imageUrl: url, imageStatus: 'done' };
+      setCards(updatedCards);
+      setStatus('图片重新生成完成');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : '图片重新生成失败');
+      setStatus('');
+    }
+  }, [cards, aiConfig]);
+
+  // ============================================================
+  // Stage 5: 导出PNG
+  // ============================================================
   const handleExport = useCallback(async () => {
     if (!cardRef.current) return;
     setStatus('正在导出图片...');
@@ -165,31 +312,216 @@ const App: React.FC = () => {
         pixelRatio: 2,
         backgroundColor: selectedTemplate.canvas.backgroundColor,
       });
-      ExportService.download(dataUrl, `${content.title || '知识卡片'}-${Date.now()}.png`);
+      ExportService.download(dataUrl, `${activeContent.title || '信息图'}-${activeCardIndex + 1}-${Date.now()}.png`);
       setStatus('导出完成');
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : '导出失败');
     }
-  }, [selectedTemplate, content]);
+  }, [selectedTemplate, activeContent, activeCardIndex]);
 
-  // ===== 重新开始 =====
-  const handleReset = useCallback(() => {
-    setStep('input');
-    setTopic('');
-    setContent(EMPTY_CONTENT);
-    setAiContent(null);
-    setImageUrl('');
-    setStatus('');
+  // ===== 批量导出进度状态 =====
+  const [exportProgress, setExportProgress] = useState({ current: 0, total: 0, msg: '', active: false });
+
+  /**
+   * 批量导出所有卡片为PNG并逐个下载
+   * 原理：依次切换 activeCardIndex → 等待渲染 → 截图 → 下载
+   */
+  const handleExportBatch = useCallback(async () => {
+    if (cards.length === 0) return;
+    setExportProgress({ current: 0, total: cards.length, msg: '准备批量导出...', active: true });
     setErrorMsg('');
-    setEditedPrompt('');
+    const originalIndex = activeCardIndex;
+
+    try {
+      for (let i = 0; i < cards.length; i++) {
+        setExportProgress({ current: i, total: cards.length, msg: `正在导出第 ${i + 1}/${cards.length} 张...`, active: true });
+        // 切换到目标卡片
+        setActiveCardIndex(i);
+        // 等待 React 重新渲染 + 图片加载
+        await new Promise(r => setTimeout(r, 400));
+
+        if (!cardRef.current) continue;
+        const content = cards[i]?.content || EMPTY_CONTENT;
+        const dataUrl = await ExportService.exportAsPng(cardRef.current, {
+          width: selectedTemplate.canvas.width,
+          height: selectedTemplate.canvas.height,
+          pixelRatio: 2,
+          backgroundColor: selectedTemplate.canvas.backgroundColor,
+        });
+        const filename = `${content.title || '信息图'}-${i + 1}-${Date.now()}.png`;
+        ExportService.download(dataUrl, filename);
+        // 间隔避免浏览器拦截
+        await new Promise(r => setTimeout(r, 250));
+      }
+      setExportProgress({ current: cards.length, total: cards.length, msg: `全部 ${cards.length} 张已导出`, active: false });
+      setStatus(`批量导出完成，共 ${cards.length} 张`);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : '批量导出失败');
+      setExportProgress({ current: 0, total: 0, msg: '', active: false });
+    } finally {
+      // 恢复原选中卡片
+      setActiveCardIndex(originalIndex);
+    }
+  }, [cards, selectedTemplate, activeCardIndex]);
+
+  /**
+   * 批量导出所有卡片并打包为ZIP下载
+   */
+  const handleExportZip = useCallback(async () => {
+    if (cards.length === 0) return;
+    setExportProgress({ current: 0, total: cards.length, msg: '准备打包导出...', active: true });
+    setErrorMsg('');
+    const originalIndex = activeCardIndex;
+
+    try {
+      const exportCards: ExportCardParams[] = [];
+
+      // 第一阶段：依次渲染并截图，收集所有 dataUrl
+      for (let i = 0; i < cards.length; i++) {
+        setExportProgress({ current: i, total: cards.length, msg: `正在生成第 ${i + 1}/${cards.length} 张...`, active: true });
+        setActiveCardIndex(i);
+        await new Promise(r => setTimeout(r, 400));
+
+        if (!cardRef.current) continue;
+        const content = cards[i]?.content || EMPTY_CONTENT;
+        const dataUrl = await ExportService.exportAsPng(cardRef.current, {
+          width: selectedTemplate.canvas.width,
+          height: selectedTemplate.canvas.height,
+          pixelRatio: 2,
+          backgroundColor: selectedTemplate.canvas.backgroundColor,
+        });
+        exportCards.push({
+          element: cardRef.current,
+          filename: `${content.title || '信息图'}-${String(i + 1).padStart(2, '0')}.png`,
+          width: selectedTemplate.canvas.width,
+          height: selectedTemplate.canvas.height,
+          pixelRatio: 2,
+          backgroundColor: selectedTemplate.canvas.backgroundColor,
+        });
+        // 把 dataUrl 临时存储（因为 element 会随切换变化，需在切换前提取）
+        // 直接用闭包存储 dataUrl
+        (exportCards[exportCards.length - 1] as any)._dataUrl = dataUrl;
+      }
+
+      // 第二阶段：打包为 ZIP
+      setExportProgress({ current: cards.length, total: cards.length, msg: '正在打包ZIP...', active: true });
+      const zipName = `${topic || '知识卡片'}-${new Date().toISOString().slice(0, 10)}`;
+      const { default: JSZip } = await import('jszip');
+      const zip = new JSZip();
+      const folder = zip.folder(zipName) || zip;
+
+      for (const card of exportCards) {
+        const dataUrl = (card as any)._dataUrl as string;
+        const base64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
+        folder.file(card.filename, base64, { base64: true });
+      }
+
+      const zipBlob = await zip.generateAsync({
+        type: 'blob',
+        compression: 'DEFLATE',
+        compressionOptions: { level: 6 },
+      });
+
+      const zipUrl = URL.createObjectURL(zipBlob);
+      const link = document.createElement('a');
+      link.download = `${zipName}.zip`;
+      link.href = zipUrl;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(zipUrl), 10000);
+
+      setExportProgress({ current: cards.length, total: cards.length, msg: `ZIP打包完成，共 ${cards.length} 张`, active: false });
+      setStatus(`ZIP打包完成，共 ${cards.length} 张`);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'ZIP打包失败');
+      setExportProgress({ current: 0, total: 0, msg: '', active: false });
+    } finally {
+      setActiveCardIndex(originalIndex);
+    }
+  }, [cards, selectedTemplate, activeCardIndex, topic]);
+
+  // ============================================================
+  // 项目保存/加载
+  // ============================================================
+  const handleSaveProject = useCallback(() => {
+    if (!knowledge || cards.length === 0) return;
+    const project = ProjectService.createProject(topic, selectedTemplate.id, selectedStylePreset.id, cards);
+    ProjectService.save(project);
+    setStatus('项目已保存');
+  }, [topic, selectedTemplate, selectedStylePreset, knowledge, cards]);
+
+  const handleLoadProject = useCallback(() => {
+    const project = ProjectService.load();
+    if (!project) { setErrorMsg('未找到已保存的项目'); return; }
+    const tpl = getTemplateById(project.templateId);
+    if (tpl) setSelectedTemplate(tpl);
+    const sp = stylePresets.find(s => s.id === project.stylePresetId);
+    if (sp) setSelectedStylePreset(sp);
+    setTopic(project.topic);
+    setCards(project.cards);
+    if (project.cards[0]?.knowledge) setKnowledge(project.cards[0].knowledge);
+    setActiveCardIndex(0);
+    // 根据已有数据跳到合适阶段
+    if (project.cards.every(c => c.imageUrl)) setStage('review-image');
+    else if (project.cards.every(c => c.prompt)) setStage('review-prompt');
+    else if (project.cards.every(c => c.content)) setStage('review-content');
+    else if (project.cards[0]?.knowledge) setStage('review-knowledge');
+    setStatus('项目已加载');
   }, []);
 
-  // 当前提示词信息
-  const currentPromptInfo = aiContent
-    ? PromptBuilder.buildFromAIContent(selectedTemplate.promptTemplate, content, aiContent)
-    : { prompt: PromptBuilder.build(selectedTemplate.promptTemplate, content), negative: selectedTemplate.promptTemplate.negative, source: 'template' as const };
+  const handleExportProject = useCallback(() => {
+    if (cards.length === 0) return;
+    const project = ProjectService.createProject(topic, selectedTemplate.id, selectedStylePreset.id, cards);
+    ProjectService.downloadJSON(project);
+    setStatus('项目JSON已下载');
+  }, [topic, selectedTemplate, selectedStylePreset, cards]);
 
-  // 输入框组件
+  // ===== 返回输入页（保留已生成数据） =====
+  const handleBackToInput = useCallback(() => {
+    setStage('input');
+    setStatus('');
+    setErrorMsg('');
+    // 不清除 knowledge、cards 等数据，用户可修改模板/风格后继续
+  }, []);
+
+  // ===== 完全重新开始（清除所有数据） =====
+  const handleClearAll = useCallback(() => {
+    setStage('input');
+    setTopic('');
+    setKnowledge(null);
+    setCards([]);
+    setActiveCardIndex(0);
+    setStatus('');
+    setErrorMsg('');
+  }, []);
+
+  // ===== 更新当前卡片内容 =====
+  const updateActiveCardContent = useCallback((content: CardContent) => {
+    setCards(prev => prev.map((c, i) => i === activeCardIndex ? { ...c, content } : c));
+  }, [activeCardIndex]);
+
+  // ===== 更新当前卡片Prompt =====
+  const updateActiveCardPrompt = useCallback((prompt: VisualPrompt) => {
+    setCards(prev => prev.map((c, i) => i === activeCardIndex ? { ...c, prompt } : c));
+  }, [activeCardIndex]);
+
+  // ===== 渲染卡片 =====
+  const renderCard = () => {
+    const content = activeContent;
+    const imageUrl = activeImageUrl;
+    const tpl = selectedTemplate;
+
+    if (tpl.renderer === 'knowledge' || tpl.renderer === 'lifecycle' || tpl.renderer === 'timeline' || tpl.renderer === 'process') {
+      return <KnowledgeCardRenderer template={tpl} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} stylePreset={selectedStylePreset} cardIndex={activeCardIndex} />;
+    }
+    if (tpl.renderer === 'html') {
+      return <RichCardRenderer template={tpl} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />;
+    }
+    return <CardRenderer template={tpl} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />;
+  };
+
+  // ===== 输入框组件 =====
   const Field: React.FC<{ label: string; value: string; onChange: (v: string) => void; placeholder?: string; multiline?: boolean }> =
     ({ label, value, onChange, placeholder, multiline }) => (
       <div className="mb-3">
@@ -204,80 +536,130 @@ const App: React.FC = () => {
       </div>
     );
 
-  // 步骤指示器
+  // ===== 步骤指示器 =====
   const StepIndicator: React.FC = () => {
-    const steps = [
-      { key: 'input', label: '输入主题', icon: '1' },
-      { key: 'review-content', label: '检查内容', icon: '2' },
-      { key: 'done', label: '生成底图', icon: '3' },
-    ];
-    const currentIdx = steps.findIndex(s => s.key === step || (step === 'generating-content' && s.key === 'input') || (step === 'generating-image' && s.key === 'review-content'));
-
+    const num = currentStageNum();
     return (
       <div className="flex items-center gap-1 mb-4">
-        {steps.map((s, i) => (
-          <React.Fragment key={s.key}>
-            <div className={`flex items-center gap-1.5 ${i <= currentIdx ? 'text-amber-600' : 'text-gray-400'}`}>
-              <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
-                i < currentIdx ? 'bg-amber-500 text-white' : i === currentIdx ? 'bg-amber-100 text-amber-600 border-2 border-amber-500' : 'bg-gray-100'
+        {STAGES.map((s, i) => (
+          <React.Fragment key={s.num}>
+            <div className={`flex items-center gap-1.5 ${s.num <= num ? 'text-amber-600' : 'text-gray-400'}`}>
+              <span className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${
+                s.num < num ? 'bg-amber-500 text-white' : s.num === num ? 'bg-amber-100 text-amber-600 border-2 border-amber-500' : 'bg-gray-100'
               }`}>
-                {i < currentIdx ? '✓' : s.icon}
+                {s.num < num ? '✓' : s.num}
               </span>
-              <span className="text-xs font-medium hidden sm:inline">{s.label}</span>
+              <span className="text-xs font-medium hidden md:inline">{s.label}</span>
             </div>
-            {i < steps.length - 1 && <div className={`flex-1 h-0.5 mx-1 ${i < currentIdx ? 'bg-amber-500' : 'bg-gray-200'}`} />}
+            {i < STAGES.length - 1 && <div className={`flex-1 h-0.5 mx-1 ${s.num < num ? 'bg-amber-500' : 'bg-gray-200'}`} />}
           </React.Fragment>
         ))}
       </div>
     );
   };
 
+  // ===== 卡片选择器（系列模板） =====
+  const CardSelector: React.FC = () => {
+    if (!isSeries || cards.length === 0) return null;
+    return (
+      <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+        {cards.map((c, i) => (
+          <button key={c.id} onClick={() => setActiveCardIndex(i)}
+            className={`px-2.5 py-1 text-xs rounded-full transition ${
+              i === activeCardIndex ? 'bg-amber-500 text-white' : 'bg-gray-100 hover:bg-amber-100 text-gray-600'
+            }`}>
+            {String(i + 1).padStart(2, '0')} {c.stage?.slice(0, 6)}
+          </button>
+        ))}
+      </div>
+    );
+  };
+
+  // ===== 生成中遮罩 =====
+  const isGenerating = stage.startsWith('generating-');
+
   return (
     <div className="flex h-screen overflow-hidden bg-gray-100">
       {/* ====== 左侧控制面板 ====== */}
-      <aside className="w-[440px] flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden">
+      <aside className="w-[540px] flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden">
         {/* 顶部标题 */}
         <div className="px-5 py-3.5 border-b border-gray-200 bg-gradient-to-r from-amber-50 to-orange-50">
-          <h1 className="text-lg font-bold text-gray-800 flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
-            AI知识卡片生成器
-          </h1>
-          <p className="text-xs text-gray-500 mt-0.5">输入主题 → AI生成内容 → 检查编辑 → 生成底图 → 导出</p>
+          <div className="flex items-center justify-between">
+            <h1 className="text-lg font-bold text-gray-800 flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
+              AI信息图工作室
+            </h1>
+            <div className="flex items-center gap-1.5">
+              <button onClick={handleSaveProject} disabled={cards.length === 0}
+                className="text-xs px-2 py-1 text-gray-500 hover:text-amber-600 disabled:opacity-30" title="保存项目">💾</button>
+              <button onClick={handleLoadProject}
+                className="text-xs px-2 py-1 text-gray-500 hover:text-amber-600" title="加载项目">📂</button>
+              <button onClick={handleExportProject} disabled={cards.length === 0}
+                className="text-xs px-2 py-1 text-gray-500 hover:text-amber-600 disabled:opacity-30" title="导出JSON">📤</button>
+            </div>
+          </div>
+          <p className="text-xs text-gray-500 mt-0.5">五阶段全链路：知识检索 → 内容生成 → Prompt → 出图 → 排版</p>
         </div>
 
         {/* 步骤指示器 */}
-        <div className="px-5 pt-4">
-          <StepIndicator />
-        </div>
+        {stage !== 'input' && (
+          <div className="px-5 pt-4">
+            <StepIndicator />
+          </div>
+        )}
 
         {/* 可滚动内容区 */}
         <div className="flex-1 overflow-y-auto px-5 pb-4">
-          {/* ===== 步骤1: 主题输入 ===== */}
-          {(step === 'input' || step === 'generating-content') && (
+          {/* ===== 输入阶段 ===== */}
+          {stage === 'input' && (
             <section>
-              <h2 className="text-sm font-semibold text-gray-700 mb-3">输入主题</h2>
+              {/* 已有数据提示栏 */}
+              {knowledge && cards.length > 0 && (
+                <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-sm">📋</span>
+                    <span className="text-xs font-medium text-green-700">已有项目数据：{topic}（{cards.length}张卡片）</span>
+                  </div>
+                  <p className="text-[11px] text-green-600 mb-2">
+                    已生成：{knowledge.facts.length > 0 ? '知识库' : ''} {cards[0]?.content ? '· 内容' : ''} {cards[0]?.prompt ? '· Prompt' : ''} {cards[0]?.imageUrl ? '· 图片' : ''}
+                  </p>
+                  <div className="flex gap-2">
+                    {cards[0]?.imageUrl ? (
+                      <button onClick={() => setStage('review-image')}
+                        className="flex-1 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 transition">继续排版导出 →</button>
+                    ) : cards[0]?.prompt ? (
+                      <button onClick={() => setStage('review-prompt')}
+                        className="flex-1 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 transition">继续生成图片 →</button>
+                    ) : cards[0]?.content ? (
+                      <button onClick={() => setStage('review-content')}
+                        className="flex-1 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 transition">继续生成Prompt →</button>
+                    ) : (
+                      <button onClick={() => setStage('review-knowledge')}
+                        className="flex-1 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 transition">继续生成内容 →</button>
+                    )}
+                    <button onClick={handleClearAll}
+                      className="px-3 py-1.5 text-xs text-red-500 border border-red-200 rounded-lg hover:bg-red-50 transition">清空重来</button>
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1.5">可修改模板/风格后点击下方"开始知识检索"重新生成</p>
+                </div>
+              )}
+
+              <h2 className="text-sm font-semibold text-gray-700 mb-3">{knowledge && cards.length > 0 ? '修改设置' : '输入主题'}</h2>
               <div className="mb-3">
-                <input
-                  type="text"
-                  className="w-full px-3 py-2.5 border-2 border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent transition"
-                  value={topic}
-                  onChange={(e) => setTopic(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleGenerateContent()}
-                  placeholder="输入知识卡片主题，如：立春、人工智能、茶文化..."
-                  disabled={step === 'generating-content'}
-                />
-                <p className="text-xs text-gray-400 mt-1.5">AI会自动搜索相关知识，生成标题、正文和配图提示词</p>
+                <input type="text" className="w-full px-3 py-2.5 border-2 border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent transition"
+                  value={topic} onChange={(e) => setTopic(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleStart()}
+                  placeholder="输入主题，如：夜鹭、王安石变法、造纸术..." />
+                <p className="text-xs text-gray-400 mt-1.5">AI将自动检索知识、生成内容、构建Prompt、生成图片</p>
               </div>
 
               {/* 快捷主题 */}
               <div className="mb-4">
                 <p className="text-xs text-gray-500 mb-2">试试这些主题：</p>
                 <div className="flex flex-wrap gap-1.5">
-                  {['立春', '雨水', '惊蛰', '茶文化', '书法', '人工智能', '量子计算', '区块链', '深海', '极光', '睡眠', '敦煌', '长城', '丝绸之路', '国画', '京剧', '火山'].map(t => (
+                  {['夜鹭', '向日葵', '大熊猫', '王安石变法', '丝绸之路', '造纸术', '立春', '敦煌', '人工智能', '量子计算'].map(t => (
                     <button key={t} onClick={() => setTopic(t)}
-                      className="px-2.5 py-1 text-xs bg-gray-100 hover:bg-amber-100 hover:text-amber-700 rounded-full transition">
-                      {t}
-                    </button>
+                      className="px-2.5 py-1 text-xs bg-gray-100 hover:bg-amber-100 hover:text-amber-700 rounded-full transition">{t}</button>
                   ))}
                 </div>
               </div>
@@ -292,387 +674,470 @@ const App: React.FC = () => {
                     }`}>
                     <div className="flex items-center justify-between">
                       <span className="font-medium text-sm text-gray-800">{tpl.name}</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-                        tpl.category === 'guofeng' ? 'bg-yellow-100 text-yellow-700' :
-                        tpl.category === 'modern' ? 'bg-blue-100 text-blue-700' :
-                        tpl.category === 'minimal' ? 'bg-green-100 text-green-700' :
-                        tpl.category === 'scroll' ? 'bg-orange-100 text-orange-700' :
-                        tpl.category === 'handcraft' ? 'bg-pink-100 text-pink-700' :
-                        tpl.category === 'tech' ? 'bg-purple-100 text-purple-700' :
-                        'bg-teal-100 text-teal-700'
-                      }`}>{
-                        tpl.category === 'guofeng' ? '国风' :
-                        tpl.category === 'modern' ? '科技' :
-                        tpl.category === 'minimal' ? '简约' :
-                        tpl.category === 'scroll' ? '卷轴' :
-                        tpl.category === 'handcraft' ? '手账' :
-                        tpl.category === 'tech' ? '信息图' : '自然'
-                      }</span>
+                      <div className="flex items-center gap-1">
+                        {tpl.cardCount && tpl.cardCount > 1 && <span className="text-[10px] text-blue-500">{tpl.cardCount}张</span>}
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                          ['lifecycle','timeline','process'].includes(tpl.category) ? 'bg-purple-100 text-purple-700' :
+                          ['quick','encyclopedia','compare'].includes(tpl.category) ? 'bg-teal-100 text-teal-700' :
+                          'bg-gray-100 text-gray-600'
+                        }`}>{tpl.category}</span>
+                      </div>
                     </div>
                   </button>
                 ))}
               </div>
 
-              {/* AI文本模型配置 */}
-              <details className="mb-3">
-                <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">AI文本模型配置</summary>
-                <div className="mt-2 p-3 bg-gray-50 rounded-lg">
-                  <div className="grid grid-cols-4 gap-1 mb-2">
-                    {([
-                      { v: 'mock', l: '本地' },
-                      { v: 'qianwen', l: '千问' },
-                      { v: 'deepseek', l: 'DeepSeek' },
-                      { v: 'zhipu', l: '智谱' },
-                    ] as const).map(o => (
-                      <button key={o.v} onClick={() => setTextConfig({ ...textConfig, provider: o.v })}
-                        className={`px-1 py-1.5 text-xs rounded border ${textConfig.provider === o.v ? 'border-amber-500 bg-amber-50 text-amber-700' : 'border-gray-200'}`}>
-                        {o.l}
-                      </button>
-                    ))}
-                  </div>
-                  {textConfig.provider !== 'mock' && (
-                    <input type="password" className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs"
-                      value={textApiKey} onChange={e => setTextApiKey(e.target.value)} placeholder="文本模型API Key" />
-                  )}
-                </div>
-              </details>
-
-              <button onClick={handleGenerateContent} disabled={step === 'generating-content' || !topic.trim()}
-                className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition disabled:opacity-50 flex items-center justify-center gap-2">
-                {step === 'generating-content' ? (
-                  <><Spinner /> AI正在生成内容...</>
-                ) : (
-                  <><span>🔍</span> AI生成知识内容</>
-                )}
-              </button>
-            </section>
-          )}
-
-          {/* ===== 步骤2: 检查编辑内容 ===== */}
-          {(step === 'review-content' || step === 'generating-image') && (
-            <section>
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-gray-700">检查并编辑内容</h2>
-                <button onClick={handleReset} className="text-xs text-gray-400 hover:text-gray-600">← 重新输入</button>
+              {/* 风格预设 */}
+              <h2 className="text-sm font-semibold text-gray-700 mb-2 mt-4">选择风格</h2>
+              <div className="grid grid-cols-2 gap-2 mb-4">
+                {stylePresets.map(sp => (
+                  <button key={sp.id} onClick={() => setSelectedStylePreset(sp)}
+                    className={`px-3 py-2 rounded-lg border-2 text-left transition ${
+                      selectedStylePreset.id === sp.id ? 'border-amber-500 bg-amber-50' : 'border-gray-200 hover:border-gray-300'
+                    }`}>
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <span className="w-3 h-3 rounded-full" style={{ background: sp.palette[0] }} />
+                      <span className="text-xs font-medium text-gray-700">{sp.name}</span>
+                    </div>
+                    <p className="text-[10px] text-gray-400">{sp.nameEn}</p>
+                  </button>
+                ))}
               </div>
 
-              {aiContent?.summary && (
-                <div className="mb-3 p-2.5 bg-blue-50 border-l-3 border-blue-400 rounded-r-lg">
-                  <p className="text-xs text-blue-700"><span className="font-medium">AI摘要：</span>{aiContent.summary}</p>
-                </div>
-              )}
-
-              <Field label="标签（逗号分隔）" value={content.tags.join('，')} onChange={v => setContent({ ...content, tags: v.split('，').map(t => t.trim()).filter(Boolean) })} />
-              <Field label="主标题" value={content.title} onChange={v => setContent({ ...content, title: v })} />
-              <Field label="副标题" value={content.subtitle} onChange={v => setContent({ ...content, subtitle: v })} />
-              <Field label="正文" value={content.body} onChange={v => setContent({ ...content, body: v })} multiline />
-              <Field label="底部信息" value={content.footer} onChange={v => setContent({ ...content, footer: v })} />
-
-              {/* 多区块内容编辑（富文本模板） */}
-              {content.sections && content.sections.length > 0 && (
-                <div className="mb-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="text-xs font-medium text-gray-600">内容区块（{content.sections.length}个）</label>
-                    <button onClick={() => {
-                      const newSection: ContentSection = { id: `sec-${Date.now()}`, title: '新区块', body: '', icon: '📌' };
-                      setContent({ ...content, sections: [...(content.sections || []), newSection] });
-                    }} className="text-xs text-amber-600 hover:text-amber-700">+ 添加区块</button>
-                  </div>
-                  {content.sections.map((sec, i) => (
-                    <div key={sec.id} className="mb-2 p-2 bg-gray-50 rounded-lg border border-gray-200">
-                      <div className="flex items-center gap-2 mb-1.5">
-                        <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
-                          value={sec.title} onChange={e => {
-                            const sections = [...(content.sections || [])];
-                            sections[i] = { ...sec, title: e.target.value };
-                            setContent({ ...content, sections });
-                          }} placeholder="区块标题" />
-                        <input type="text" className="w-12 px-1 py-1 border border-gray-300 rounded text-xs text-center"
-                          value={sec.icon || ''} onChange={e => {
-                            const sections = [...(content.sections || [])];
-                            sections[i] = { ...sec, icon: e.target.value };
-                            setContent({ ...content, sections });
-                          }} placeholder="图标" />
-                        <button onClick={() => {
-                          const sections = (content.sections || []).filter((_, j) => j !== i);
-                          setContent({ ...content, sections });
-                        }} className="text-xs text-red-400 hover:text-red-600 px-1">✕</button>
-                      </div>
-                      <textarea className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs resize-y" rows={2}
-                        value={sec.body} onChange={e => {
-                          const sections = [...(content.sections || [])];
-                          sections[i] = { ...sec, body: e.target.value };
-                          setContent({ ...content, sections });
-                        }} placeholder="区块内容" />
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* 要点列表编辑 */}
-              {content.highlights && content.highlights.length > 0 && (
-                <div className="mb-3">
-                  <label className="block text-xs font-medium text-gray-600 mb-1">要点列表</label>
-                  {content.highlights.map((h, i) => (
-                    <div key={i} className="flex items-center gap-1 mb-1">
-                      <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
-                        value={h} onChange={e => {
-                          const highlights = [...(content.highlights || [])];
-                          highlights[i] = e.target.value;
-                          setContent({ ...content, highlights });
-                        }} />
-                      <button onClick={() => {
-                        const highlights = (content.highlights || []).filter((_, j) => j !== i);
-                        setContent({ ...content, highlights });
-                      }} className="text-xs text-red-400 hover:text-red-600 px-1">✕</button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* ===== 知识卡片专用编辑 ===== */}
-              {selectedTemplate.renderer === 'knowledge' && (
-                <>
-                  {/* 系列信息 */}
-                  <div className="mb-3 grid grid-cols-2 gap-2">
+              {/* AI配置 — 仅展示模型信息，API Key 由服务端持有 */}
+              <details className="mb-3">
+                <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">⚙️ AI模型配置</summary>
+                <div className="mt-2 p-3 bg-gray-50 rounded-lg space-y-2">
+                  <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">系列名称</label>
+                      <label className="block text-xs text-gray-500 mb-1">文本模型</label>
                       <input type="text" className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs"
-                        value={content.seriesName || ''} onChange={e => setContent({ ...content, seriesName: e.target.value })} />
-                    </div>
-                    <div className="flex gap-2">
-                      <div className="flex-1">
-                        <label className="block text-xs font-medium text-gray-600 mb-1">期号</label>
-                        <input type="text" className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs"
-                          value={content.episode || ''} onChange={e => setContent({ ...content, episode: e.target.value })} />
-                      </div>
-                      <div className="flex-1">
-                        <label className="block text-xs font-medium text-gray-600 mb-1">编号</label>
-                        <input type="text" className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs"
-                          value={content.topicNumber || ''} onChange={e => setContent({ ...content, topicNumber: e.target.value })} />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 英文副标题 */}
-                  <Field label="英文副标题" value={content.englishSubtitle || ''} onChange={v => setContent({ ...content, englishSubtitle: v })} />
-
-                  {/* 概念定义 */}
-                  <Field label="概念定义" value={content.definition || ''} onChange={v => setContent({ ...content, definition: v })} multiline />
-
-                  {/* 知识模块编辑 */}
-                  {content.modules && content.modules.length > 0 && (
-                    <div className="mb-3">
-                      <div className="flex items-center justify-between mb-2">
-                        <label className="text-xs font-medium text-gray-600">知识模块（{content.modules.length}个）</label>
-                        <button onClick={() => {
-                          const newMod: KnowledgeModule = { id: `mod-${Date.now()}`, type: 'tip', title: '新模块', content: '', icon: '📌' };
-                          setContent({ ...content, modules: [...(content.modules || []), newMod] });
-                        }} className="text-xs text-amber-600 hover:text-amber-700">+ 添加模块</button>
-                      </div>
-                      {content.modules.map((mod, i) => (
-                        <div key={mod.id} className="mb-2 p-2 bg-gray-50 rounded-lg border border-gray-200">
-                          <div className="flex items-center gap-2 mb-1.5">
-                            <input type="text" className="w-10 px-1 py-1 border border-gray-300 rounded text-xs text-center"
-                              value={mod.icon || ''} onChange={e => {
-                                const modules = [...(content.modules || [])];
-                                modules[i] = { ...mod, icon: e.target.value };
-                                setContent({ ...content, modules });
-                              }} placeholder="图标" />
-                            <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
-                              value={mod.title} onChange={e => {
-                                const modules = [...(content.modules || [])];
-                                modules[i] = { ...mod, title: e.target.value };
-                                setContent({ ...content, modules });
-                              }} placeholder="模块标题" />
-                            <button onClick={() => {
-                              const modules = (content.modules || []).filter((_, j) => j !== i);
-                              setContent({ ...content, modules });
-                            }} className="text-xs text-red-400 hover:text-red-600 px-1">✕</button>
-                          </div>
-                          {mod.bullets && mod.bullets.length > 0 ? (
-                            <div className="space-y-1">
-                              {mod.bullets.map((b, j) => (
-                                <div key={j} className="flex items-center gap-1">
-                                  <span className="text-xs text-gray-400">•</span>
-                                  <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
-                                    value={b} onChange={e => {
-                                      const modules = [...(content.modules || [])];
-                                      const bullets = [...(mod.bullets || [])];
-                                      bullets[j] = e.target.value;
-                                      modules[i] = { ...mod, bullets };
-                                      setContent({ ...content, modules });
-                                    }} />
-                                  <button onClick={() => {
-                                    const modules = [...(content.modules || [])];
-                                    const bullets = (mod.bullets || []).filter((_, k) => k !== j);
-                                    modules[i] = { ...mod, bullets };
-                                    setContent({ ...content, modules });
-                                  }} className="text-xs text-red-400 hover:text-red-600">✕</button>
-                                </div>
-                              ))}
-                              <button onClick={() => {
-                                const modules = [...(content.modules || [])];
-                                const bullets = [...(mod.bullets || []), ''];
-                                modules[i] = { ...mod, bullets };
-                                setContent({ ...content, modules });
-                              }} className="text-xs text-blue-400 hover:text-blue-600">+ 要点</button>
-                            </div>
-                          ) : (
-                            <textarea className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs resize-y" rows={2}
-                              value={mod.content} onChange={e => {
-                                const modules = [...(content.modules || [])];
-                                modules[i] = { ...mod, content: e.target.value };
-                                setContent({ ...content, modules });
-                              }} placeholder="模块内容" />
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* 手写批注 */}
-                  <Field label="手写批注" value={content.handwrittenNote || ''} onChange={v => setContent({ ...content, handwrittenNote: v })} />
-
-                  {/* 金句 */}
-                  <Field label="底部金句" value={content.quote || ''} onChange={v => setContent({ ...content, quote: v })} multiline />
-                </>
-              )}
-
-              {/* 提示词编辑面板 */}
-              <div className="mb-3">
-                <button onClick={() => setShowPromptPanel(!showPromptPanel)}
-                  className="text-xs text-amber-600 hover:text-amber-700 flex items-center gap-1">
-                  <span className={`transition-transform ${showPromptPanel ? 'rotate-90' : ''}`}>▶</span>
-                  配图提示词 {currentPromptInfo.source === 'ai' && <span className="text-[10px] bg-green-100 text-green-600 px-1.5 rounded-full">AI生成</span>}
-                </button>
-                {showPromptPanel && (
-                  <div className="mt-2 space-y-2">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">正向提示词（可编辑）</label>
-                      <textarea className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs focus:ring-2 focus:ring-amber-500 resize-y" rows={3}
-                        value={editedPrompt} onChange={e => setEditedPrompt(e.target.value)} />
-                      <p className="text-[10px] text-gray-400 mt-0.5">编辑内容后提示词会自动更新，也可手动修改</p>
+                        value={aiConfig.textModel} onChange={e => setAiConfig({ ...aiConfig, textModel: e.target.value })} />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">负面提示词</label>
-                      <p className="text-xs text-gray-500 p-2 bg-gray-50 rounded break-all">{selectedTemplate.promptTemplate.negative}</p>
+                      <label className="block text-xs text-gray-500 mb-1">图片模型</label>
+                      <input type="text" className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs"
+                        value={aiConfig.imageModel} onChange={e => setAiConfig({ ...aiConfig, imageModel: e.target.value })} />
                     </div>
                   </div>
-                )}
-              </div>
-
-              {/* 图片模型配置 */}
-              <details className="mb-3">
-                <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">AI图片模型配置</summary>
-                <div className="mt-2 p-3 bg-gray-50 rounded-lg">
-                  <div className="grid grid-cols-3 gap-1 mb-2">
-                    {([
-                      { v: 'mock', l: '本地Mock' },
-                      { v: 'tongyi', l: '通义万相' },
-                      { v: 'wenxin', l: '文心一格' },
-                    ] as const).map(o => (
-                      <button key={o.v} onClick={() => setImageConfig({ ...imageConfig, provider: o.v })}
-                        className={`px-1 py-1.5 text-xs rounded border ${imageConfig.provider === o.v ? 'border-amber-500 bg-amber-50 text-amber-700' : 'border-gray-200'}`}>
-                        {o.l}
-                      </button>
-                    ))}
-                  </div>
-                  {imageConfig.provider !== 'mock' && (
-                    <input type="password" className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs"
-                      value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="图片API Key" />
-                  )}
+                  <p className="text-[10px] text-gray-400">
+                    API Key 由服务端代理配置，前端不暴露密钥
+                  </p>
                 </div>
               </details>
 
-              <button onClick={handleGenerateImage} disabled={step === 'generating-image'}
+              <button onClick={handleStart} disabled={!topic.trim()}
                 className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition disabled:opacity-50 flex items-center justify-center gap-2">
-                {step === 'generating-image' ? (<><Spinner /> 正在生成底图...</>) : (<><span>🎨</span> 生成AI底图</>)}
+                <span>🔍</span> 开始知识检索
               </button>
             </section>
           )}
 
-          {/* ===== 步骤3: 完成 ===== */}
-          {step === 'done' && (
+          {/* ===== Stage 1: 知识检索审校 ===== */}
+          {(stage === 'review-knowledge' || stage === 'generating-content') && knowledge && (
             <section>
               <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-gray-700">生成完成</h2>
-                <button onClick={handleReset} className="text-xs text-gray-400 hover:text-gray-600">← 重新开始</button>
+                <h2 className="text-sm font-semibold text-gray-700">阶段1：知识检索结果</h2>
+                <button onClick={handleBackToInput} className="text-xs text-gray-400 hover:text-gray-600">← 重新输入</button>
               </div>
 
-              <div className="p-3 bg-green-50 border border-green-200 rounded-lg mb-3">
-                <p className="text-sm text-green-700 font-medium">✓ 卡片已生成完成</p>
-                <p className="text-xs text-green-600 mt-1">可以导出图片，或返回编辑内容后重新生成底图</p>
+              <div className="mb-3 p-3 bg-blue-50 rounded-lg">
+                <p className="text-sm font-medium text-gray-800">{knowledge.topic}</p>
+                <p className="text-xs text-gray-500 mt-1">{knowledge.summary}</p>
+                <div className="flex flex-wrap gap-1 mt-2">
+                  {knowledge.tags.map(t => <span key={t} className="text-[10px] px-2 py-0.5 bg-blue-100 text-blue-600 rounded-full">{t}</span>)}
+                </div>
               </div>
 
-              {/* 快速编辑入口 */}
-              <button onClick={() => setStep('review-content')}
-                className="w-full py-2 mb-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition">
-                ✏️ 编辑内容后重新生成
+              {knowledge.facts.length > 0 && (
+                <div className="mb-3">
+                  <label className="text-xs font-medium text-gray-600 mb-1.5 block">关键事实</label>
+                  <div className="space-y-1">
+                    {knowledge.facts.map((f, i) => (
+                      <div key={i} className="flex items-center gap-2 p-2 bg-gray-50 rounded">
+                        <span className="text-xs text-gray-500 w-20 flex-shrink-0">{f.label}</span>
+                        <input type="text" className="flex-1 px-2 py-1 border border-gray-200 rounded text-xs"
+                          value={f.value} onChange={e => {
+                            const facts = [...knowledge.facts];
+                            facts[i] = { ...f, value: e.target.value };
+                            setKnowledge({ ...knowledge, facts });
+                          }} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {knowledge.keyPoints.length > 0 && (
+                <div className="mb-3">
+                  <label className="text-xs font-medium text-gray-600 mb-1.5 block">核心要点</label>
+                  {knowledge.keyPoints.map((p, i) => (
+                    <input key={i} type="text" className="w-full px-2 py-1.5 mb-1 border border-gray-200 rounded text-xs"
+                      value={p} onChange={e => {
+                        const keyPoints = [...knowledge.keyPoints];
+                        keyPoints[i] = e.target.value;
+                        setKnowledge({ ...knowledge, keyPoints });
+                      }} />
+                  ))}
+                </div>
+              )}
+
+              {knowledge.lifecycleStages && knowledge.lifecycleStages.length > 0 && (
+                <div className="mb-3">
+                  <label className="text-xs font-medium text-gray-600 mb-1.5 block">生命周期阶段（{knowledge.lifecycleStages.length}个）</label>
+                  <div className="space-y-1.5">
+                    {knowledge.lifecycleStages.map((s, i) => (
+                      <div key={s.id} className="p-2 bg-gray-50 rounded">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-xs font-medium text-amber-600">{String(i + 1).padStart(2, '0')}</span>
+                          <span className="text-xs text-gray-700">{s.name} · {s.period}</span>
+                        </div>
+                        <p className="text-[11px] text-gray-500">{s.description}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {knowledge.timelineEvents && knowledge.timelineEvents.length > 0 && (
+                <div className="mb-3">
+                  <label className="text-xs font-medium text-gray-600 mb-1.5 block">时间线事件（{knowledge.timelineEvents.length}个）</label>
+                  <div className="space-y-1.5">
+                    {knowledge.timelineEvents.map((e, i) => (
+                      <div key={e.id} className="p-2 bg-gray-50 rounded">
+                        <span className="text-xs font-medium text-amber-600">{e.year}</span>
+                        <span className="text-xs text-gray-700 ml-2">{e.title}</span>
+                        <p className="text-[11px] text-gray-500 mt-0.5">{e.description}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <button onClick={handleGenerateContent} disabled={stage === 'generating-content'}
+                className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition disabled:opacity-50 flex items-center justify-center gap-2">
+                {stage === 'generating-content' ? <><Spinner /> 生成中...</> : <><span>✍️</span> 生成卡片内容</>}
               </button>
+            </section>
+          )}
+
+          {/* ===== Stage 2: 内容审校 ===== */}
+          {(stage === 'review-content' || stage === 'generating-prompt') && activeCard && (
+            <section>
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-gray-700">阶段2：内容审校</h2>
+                <button onClick={() => setStage('review-knowledge')} className="text-xs text-gray-400 hover:text-gray-600">← 知识</button>
+              </div>
+
+              <CardSelector />
+
+              <Field label="主标题" value={activeContent.title} onChange={v => updateActiveCardContent({ ...activeContent, title: v })} />
+              <Field label="副标题" value={activeContent.subtitle} onChange={v => updateActiveCardContent({ ...activeContent, subtitle: v })} />
+              <Field label="正文" value={activeContent.body} onChange={v => updateActiveCardContent({ ...activeContent, body: v })} multiline />
+              <Field label="底部信息" value={activeContent.footer} onChange={v => updateActiveCardContent({ ...activeContent, footer: v })} />
+
+              {/* 知识模块编辑 */}
+              {activeContent.modules && activeContent.modules.length > 0 && (
+                <div className="mb-3">
+                  <label className="text-xs font-medium text-gray-600 mb-1.5 block">知识模块（{activeContent.modules.length}个）</label>
+                  {activeContent.modules.map((mod, i) => (
+                    <div key={mod.id} className="mb-2 p-2 bg-gray-50 rounded-lg border border-gray-200">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <input type="text" className="w-10 px-1 py-1 border border-gray-300 rounded text-xs text-center"
+                          value={mod.icon || ''} onChange={e => {
+                            const modules = [...(activeContent.modules || [])];
+                            modules[i] = { ...mod, icon: e.target.value };
+                            updateActiveCardContent({ ...activeContent, modules });
+                          }} />
+                        <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
+                          value={mod.title} onChange={e => {
+                            const modules = [...(activeContent.modules || [])];
+                            modules[i] = { ...mod, title: e.target.value };
+                            updateActiveCardContent({ ...activeContent, modules });
+                          }} />
+                      </div>
+                      {mod.bullets && mod.bullets.length > 0 ? (
+                        <div className="space-y-1">
+                          {mod.bullets.map((b, j) => (
+                            <div key={j} className="flex items-center gap-1">
+                              <span className="text-xs text-gray-400">•</span>
+                              <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
+                                value={b} onChange={e => {
+                                  const modules = [...(activeContent.modules || [])];
+                                  const bullets = [...(mod.bullets || [])];
+                                  bullets[j] = e.target.value;
+                                  modules[i] = { ...mod, bullets };
+                                  updateActiveCardContent({ ...activeContent, modules });
+                                }} />
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <textarea className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs resize-y" rows={2}
+                          value={mod.content} onChange={e => {
+                            const modules = [...(activeContent.modules || [])];
+                            modules[i] = { ...mod, content: e.target.value };
+                            updateActiveCardContent({ ...activeContent, modules });
+                          }} />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {activeContent.quote && (
+                <Field label="金句" value={activeContent.quote} onChange={v => updateActiveCardContent({ ...activeContent, quote: v })} multiline />
+              )}
+
+              <button onClick={handleGeneratePrompts} disabled={stage === 'generating-prompt'}
+                className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition disabled:opacity-50 flex items-center justify-center gap-2">
+                {stage === 'generating-prompt' ? <><Spinner /> 生成中...</> : <><span>🎨</span> 生成Prompt</>}
+              </button>
+            </section>
+          )}
+
+          {/* ===== Stage 3: Prompt审校 ===== */}
+          {(stage === 'review-prompt' || stage === 'generating-image') && activeCard?.prompt && (
+            <section>
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-gray-700">阶段3：Prompt审校</h2>
+                <button onClick={() => setStage('review-content')} className="text-xs text-gray-400 hover:text-gray-600">← 内容</button>
+              </div>
+
+              <CardSelector />
+
+              {/* AI 改写说明横幅 */}
+              <div className="mb-2 p-2 bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-200 rounded-lg">
+                <div className="flex items-center gap-1.5 mb-0.5">
+                  <span className="text-xs">✨</span>
+                  <span className="text-[11px] font-semibold text-violet-700">AI 已根据当前阶段内容改写 Prompt</span>
+                </div>
+                <p className="text-[10px] text-violet-600 leading-relaxed">
+                  辅助元素已按阶段智能调整（成虫里不会再出现蛋），主视觉描述贴合当前阶段特征。如不满意可手动调整下方字段。
+                </p>
+              </div>
+
+              {/* 当前阶段信息卡 */}
+              <div className="mb-2 p-2 bg-amber-50 border-l-3 border-amber-400 rounded-r-lg">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className="text-xs">🎯</span>
+                  <span className="text-[11px] font-semibold text-amber-700">当前阶段</span>
+                </div>
+                <p className="text-xs text-amber-900 font-medium">{activeCard.stage}</p>
+                {activeCard.subtitle && (
+                  <p className="text-[10px] text-amber-700 mt-0.5">{activeCard.subtitle}</p>
+                )}
+              </div>
+
+              {/* 六段式Prompt编辑 —— 主视觉与辅助元素高亮 */}
+              {([
+                ['style', '1. 画面基调', false],
+                ['layout', '2. 布局骨架', false],
+                ['mainVisual', '3. 主视觉插画 ✨AI改写', true],
+                ['auxiliary', '4. 辅助插画 ✨AI改写', true],
+                ['whitespace', '5. 留白区定义', false],
+                ['decoration', '6. 装饰收尾', false],
+              ] as const).map(([key, label, isAI]) => (
+                <div key={key} className={isAI ? 'mb-2 p-2 bg-violet-50/50 border border-violet-200 rounded-lg' : 'mb-2'}>
+                  <Field
+                    label={label}
+                    value={activeCard.prompt![key]}
+                    multiline
+                    onChange={v => updateActiveCardPrompt({ ...activeCard.prompt!, [key]: v })}
+                  />
+                </div>
+              ))}
 
               <div className="mb-3">
-                <Field label="主标题" value={content.title} onChange={v => setContent({ ...content, title: v })} />
-                <Field label="正文" value={content.body} onChange={v => setContent({ ...content, body: v })} multiline />
+                <label className="block text-xs font-medium text-gray-600 mb-1">负面提示词</label>
+                <p className="text-xs text-gray-500 p-2 bg-gray-50 rounded break-all">{activeCard.prompt.negative}</p>
               </div>
+
+              {/* 完整Prompt预览 */}
+              <details className="mb-3">
+                <summary className="text-xs text-gray-500 cursor-pointer">查看完整Prompt</summary>
+                <pre className="mt-1 p-2 bg-gray-900 text-green-400 text-[10px] rounded overflow-x-auto whitespace-pre-wrap">
+                  {PromptBuilder.toPromptString(activeCard.prompt)}
+                </pre>
+              </details>
+
+              <button onClick={handleGenerateImages} disabled={stage === 'generating-image'}
+                className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition disabled:opacity-50 flex items-center justify-center gap-2">
+                {stage === 'generating-image' ? <><Spinner /> {imageProgress.msg || '生成中...'}</> : <><span>🖼️</span> 生成AI图片 ({cards.length}张)</>}
+              </button>
+
+              {imageProgress.total > 0 && stage === 'generating-image' && (
+                <div className="mt-2">
+                  <div className="w-full bg-gray-200 rounded-full h-1.5">
+                    <div className="bg-amber-500 h-1.5 rounded-full transition-all"
+                      style={{ width: `${(imageProgress.current / imageProgress.total) * 100}%` }} />
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1 text-center">{imageProgress.current}/{imageProgress.total}</p>
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* ===== Stage 4: 图片审校 ===== */}
+          {(stage === 'review-image' || stage === 'typeset') && activeCard && (
+            <section>
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-gray-700">阶段4：图片审校</h2>
+                <button onClick={() => setStage('review-prompt')} className="text-xs text-gray-400 hover:text-gray-600">← Prompt</button>
+              </div>
+
+              <CardSelector />
+
+              <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded-lg">
+                <p className="text-sm text-green-700 font-medium">✓ 图片已生成</p>
+                {isSeries && <p className="text-xs text-green-600 mt-1">共{cards.length}张，当前第{activeCardIndex + 1}张</p>}
+              </div>
+
+              <button onClick={() => handleRegenerateImage(activeCardIndex)}
+                className="w-full py-2 mb-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition">
+                🔄 重新生成此张图片
+              </button>
+
+              <button onClick={() => setStage('typeset')}
+                className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition flex items-center justify-center gap-2">
+                <span>📐</span> 进入排版导出
+              </button>
+            </section>
+          )}
+
+          {/* ===== Stage 5: 排版导出 ===== */}
+          {stage === 'typeset' && activeCard && (
+            <section>
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-gray-700">阶段5：排版导出</h2>
+                <button onClick={() => setStage('review-image')} className="text-xs text-gray-400 hover:text-gray-600">← 图片</button>
+              </div>
+
+              <CardSelector />
+
+              <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                <p className="text-sm text-amber-700 font-medium">📐 排版预览</p>
+                <p className="text-xs text-amber-600 mt-1">AI图做背景层，文字用HTML叠加，右侧实时预览</p>
+              </div>
+
+              {/* 快速编辑 */}
+              <Field label="主标题" value={activeContent.title} onChange={v => updateActiveCardContent({ ...activeContent, title: v })} />
+              <Field label="正文" value={activeContent.body} onChange={v => updateActiveCardContent({ ...activeContent, body: v })} multiline />
+
+              {/* 单张导出 */}
+              <button onClick={handleExport} disabled={exportProgress.active}
+                className="w-full py-2.5 bg-gray-800 text-white rounded-lg font-medium text-sm hover:bg-gray-700 transition flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                <span>⬇</span> 导出当前PNG
+              </button>
+
+              {isSeries && (
+                <p className="text-xs text-gray-400 mt-1.5 text-center">当前导出第{activeCardIndex + 1}张</p>
+              )}
+
+              {/* 批量导出 */}
+              {isSeries && cards.length > 1 && (
+                <div className="mt-3 pt-3 border-t border-gray-200">
+                  <p className="text-xs font-medium text-gray-600 mb-2">批量导出（共{cards.length}张）</p>
+                  <div className="flex gap-2">
+                    <button onClick={handleExportBatch} disabled={exportProgress.active}
+                      className="flex-1 py-2 bg-blue-600 text-white rounded-lg font-medium text-xs hover:bg-blue-700 transition flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
+                      <span>📥</span> 批量下载
+                    </button>
+                    <button onClick={handleExportZip} disabled={exportProgress.active}
+                      className="flex-1 py-2 bg-green-600 text-white rounded-lg font-medium text-xs hover:bg-green-700 transition flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
+                      <span>📦</span> ZIP打包
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1.5 text-center">批量下载逐张保存，ZIP打包合为一个文件</p>
+                </div>
+              )}
+
+              {/* 导出进度 */}
+              {exportProgress.active && (
+                <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-medium text-blue-700">{exportProgress.msg}</span>
+                    {exportProgress.total > 0 && (
+                      <span className="text-xs text-blue-600">{exportProgress.current}/{exportProgress.total}</span>
+                    )}
+                  </div>
+                  {exportProgress.total > 0 && (
+                    <div className="w-full h-2 bg-blue-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-blue-500 transition-all duration-300 rounded-full"
+                        style={{ width: `${(exportProgress.current / exportProgress.total) * 100}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
             </section>
           )}
 
           {errorMsg && <p className="text-xs text-red-500 mt-2">{errorMsg}</p>}
         </div>
 
-        {/* 底部导出按钮 */}
-        {imageUrl && (
-          <div className="px-5 py-3 border-t border-gray-200 bg-white">
-            <button onClick={handleExport}
-              className="w-full py-2.5 bg-gray-800 text-white rounded-lg font-medium text-sm hover:bg-gray-700 transition flex items-center justify-center gap-2">
-              <span>⬇</span> 导出PNG图片
-            </button>
+        {/* 生成中状态条 */}
+        {isGenerating && (
+          <div className="px-5 py-2 border-t border-gray-200 bg-amber-50">
+            <p className="text-xs text-amber-600 flex items-center gap-1.5">
+              <Spinner /> {status || '处理中...'}
+            </p>
           </div>
         )}
       </aside>
 
       {/* ====== 右侧预览区 ====== */}
       <main className="flex-1 flex flex-col overflow-hidden bg-gray-200">
-        <div className="px-6 py-2.5 bg-white border-b border-gray-200 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <span className="text-sm font-medium text-gray-700">卡片预览</span>
-            <span className="text-xs text-gray-400">{selectedTemplate.canvas.width} × {selectedTemplate.canvas.height}px</span>
-          </div>
-          <div className="flex items-center gap-3">
-            {imageUrl && <span className="text-xs text-green-600 flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500"></span>底图已生成</span>}
-            {aiContent && <span className="text-xs text-blue-600 flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500"></span>AI内容</span>}
-          </div>
-        </div>
+        {stage === 'input' ? (
+          /* 输入阶段：展示模板预览，点击模板即时切换 */
+          <TemplatePreview template={selectedTemplate} stylePreset={selectedStylePreset} />
+        ) : (
+          <>
+            <div className="px-6 py-2.5 bg-white border-b border-gray-200 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-medium text-gray-700">预览</span>
+                <span className="text-xs text-gray-400">{selectedTemplate.canvas.width}×{selectedTemplate.canvas.height}</span>
+                {isSeries && activeCard && <span className="text-xs text-blue-500">第{activeCardIndex + 1}/{cards.length}张</span>}
+              </div>
+              <div className="flex items-center gap-3">
+                {activeImageUrl && <span className="text-xs text-green-600 flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500"></span>底图已生成</span>}
+                {knowledge && <span className="text-xs text-blue-600 flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500"></span>知识库</span>}
+                <span className="text-xs text-gray-400">{selectedStylePreset.name}</span>
+              </div>
+            </div>
 
-        <div ref={previewContainerRef} className="flex-1 flex items-center justify-center overflow-auto p-6"
-          style={{ background: 'repeating-conic-gradient(#e5e5e5 0% 25%, #f5f5f5 0% 50%) 50% / 20px 20px' }}>
-          <div style={{
-              width: selectedTemplate.canvas.width * previewScale,
-              height: selectedTemplate.canvas.height * previewScale,
-              boxShadow: '0 10px 40px rgba(0,0,0,0.15)',
-              borderRadius: 8, overflow: 'hidden',
-            }}>
-              {selectedTemplate.renderer === 'knowledge' ? (
-                <KnowledgeCardRenderer template={selectedTemplate} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />
-              ) : selectedTemplate.renderer === 'html' ? (
-                <RichCardRenderer template={selectedTemplate} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />
+            <div ref={previewContainerRef} className="flex-1 flex items-center justify-center overflow-auto p-6"
+              style={{ background: 'repeating-conic-gradient(#e5e5e5 0% 25%, #f5f5f5 0% 50%) 50% / 20px 20px' }}>
+              {activeCard ? (
+                <div style={{
+                  width: selectedTemplate.canvas.width * previewScale,
+                  height: selectedTemplate.canvas.height * previewScale,
+                  boxShadow: '0 10px 40px rgba(0,0,0,0.15)',
+                  borderRadius: 8, overflow: 'hidden',
+                }}>
+                  {renderCard()}
+                </div>
               ) : (
-                <CardRenderer template={selectedTemplate} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />
+                <div className="text-center text-gray-400">
+                  <p className="text-4xl mb-3">🎨</p>
+                  <p className="text-sm">输入主题后开始生成信息图</p>
+                  <p className="text-xs mt-1">五阶段全链路自动化生产</p>
+                </div>
               )}
             </div>
-        </div>
 
-        <div className="px-6 py-2 bg-white border-t border-gray-200 flex items-center justify-between text-xs text-gray-500">
-          <span>模板: {selectedTemplate.name} · 缩放: {Math.round(previewScale * 100)}%</span>
-          <span>{status || '就绪'}</span>
-        </div>
+            <div className="px-6 py-2 bg-white border-t border-gray-200 flex items-center justify-between text-xs text-gray-500">
+              <span>模板: {selectedTemplate.name} · 缩放: {Math.round(previewScale * 100)}%</span>
+              <span>{status || '就绪'}</span>
+            </div>
+          </>
+        )}
       </main>
     </div>
   );
 };
 
-// 旋转加载图标
 const Spinner: React.FC = () => (
   <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />

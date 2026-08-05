@@ -1,6 +1,10 @@
-import type { CardTemplate } from '../types';
+import type { CardTemplate, StylePreset } from '../types';
 import { richTemplates } from './richTemplates';
 import { knowledgeTemplates } from './knowledgeTemplates';
+import { v2Templates } from './v2Templates';
+import { stylePresets } from './stylePresets';
+
+export { stylePresets };
 
 /**
  * 内置模板集合（基础图层模板 + 富文本模板）
@@ -352,5 +356,8 @@ export function getTemplateById(id: string): CardTemplate | undefined {
 // 追加富文本模板
 templates.push(...richTemplates);
 
-// 追加知识卡片模板（放在最前面优先使用）
+// 追加知识卡片模板
 templates.unshift(...knowledgeTemplates);
+
+// 追加 V2 系列模板（lifecycle/timeline/process）
+templates.unshift(...v2Templates);

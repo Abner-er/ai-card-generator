@@ -1,29 +1,64 @@
 import React from 'react';
-import type { CardContent, CardTemplate, KnowledgeModule, ProcessStep, CompareItem, ModuleType } from '../types';
+import type { CardContent, CardTemplate, ModuleType, StylePreset } from '../types';
+import { getCardTheme } from '../services/styleEngine';
+import type { CardTheme } from '../services/styleEngine';
 
-interface KnowledgeCardRendererProps {
-  template: CardTemplate;
-  content: CardContent;
-  imageUrl?: string;
-  scale?: number;
-  innerRef?: React.RefObject<HTMLDivElement | null>;
+// ============================================================
+// 工具函数
+// ============================================================
+
+/** hex 转 rgba */
+function hexToRgba(hex: string, alpha: number): string {
+  const clean = hex.replace('#', '');
+  const num = parseInt(clean, 16);
+  const r = (num >> 16) & 0xff;
+  const g = (num >> 8) & 0xff;
+  const b = num & 0xff;
+  return `rgba(${r},${g},${b},${alpha})`;
 }
 
-/** 模块颜色配置 */
-const MODULE_COLORS: Record<ModuleType, { bg: string; text: string; light: string }> = {
-  concept:  { bg: '#2563EB', text: '#1E40AF', light: 'rgba(37,99,235,0.08)' },
-  points:   { bg: '#059669', text: '#047857', light: 'rgba(5,150,105,0.08)' },
-  example:  { bg: '#D97706', text: '#B45309', light: 'rgba(217,119,6,0.08)' },
-  suitable: { bg: '#059669', text: '#047857', light: 'rgba(5,150,105,0.08)' },
-  process:  { bg: '#D97706', text: '#B45309', light: 'rgba(217,119,6,0.08)' },
-  note:     { bg: '#DC2626', text: '#B91C1C', light: 'rgba(220,38,38,0.08)' },
-  tip:      { bg: '#7C3AED', text: '#6D28D9', light: 'rgba(124,58,237,0.08)' },
-  resource: { bg: '#6B5B95', text: '#553C8B', light: 'rgba(107,91,149,0.08)' },
-  compare:  { bg: '#2563EB', text: '#1E40AF', light: 'rgba(37,99,235,0.08)' },
-  fact:     { bg: '#4B5563', text: '#374151', light: 'rgba(75,85,99,0.08)' },
-};
+/** 根据主题 palette 派生模块颜色 */
+function getModuleColors(theme: CardTheme, type: ModuleType): { bg: string; text: string; light: string } {
+  const palette = theme.palette;
+  const typeToIndex: Record<ModuleType, number> = {
+    concept: 0,
+    points: 1,
+    example: 2,
+    suitable: 1,
+    process: 2,
+    note: 3,
+    tip: 4,
+    resource: 0,
+    compare: 1,
+    fact: 3,
+  };
+  const idx = typeToIndex[type] ?? 0;
+  const color = palette[idx % palette.length];
+  return {
+    bg: color,
+    text: color,
+    light: hexToRgba(color, 0.08),
+  };
+}
 
-/** 默认图标 */
+/** 根据主题 palette 派生对比卡片颜色 */
+function getCompareColors(theme: CardTheme): Array<{ bg: string; tape: string; text: string }> {
+  return theme.palette.slice(0, 3).map((color) => ({
+    bg: hexToRgba(color, 0.22),
+    tape: hexToRgba(color, 0.7),
+    text: color,
+  }));
+}
+
+/** 获取流程步骤对应的模块类型索引 */
+function getStepModuleType(index: number): ModuleType {
+  const types: ModuleType[] = ['concept', 'points', 'process', 'note'];
+  return types[index % types.length];
+}
+
+// ============================================================
+// 模块图标（语义图标，跨风格通用）
+// ============================================================
 const MODULE_ICONS: Record<ModuleType, string> = {
   concept: '💡',
   points: '🎯',
@@ -37,24 +72,43 @@ const MODULE_ICONS: Record<ModuleType, string> = {
   fact: '📊',
 };
 
+// ============================================================
+// 主组件
+// ============================================================
+interface KnowledgeCardRendererProps {
+  template: CardTemplate;
+  content: CardContent;
+  imageUrl?: string;
+  scale?: number;
+  innerRef?: React.RefObject<HTMLDivElement | null>;
+  stylePreset?: StylePreset;
+  cardIndex?: number;
+}
+
 /**
  * 知识卡片渲染器
- * 根据模板类型渲染不同风格的结构化知识卡片
+ * 根据模板类型 + 风格预设渲染不同风格的结构化知识卡片
+ * 所有配色、字体、圆角等视觉属性由 styleEngine 动态生成
  */
 export const KnowledgeCardRenderer: React.FC<KnowledgeCardRendererProps> = (props) => {
-  const { template, content, imageUrl, scale = 1, innerRef } = props;
+  const { template, content, imageUrl, scale = 1, innerRef, stylePreset, cardIndex = 0 } = props;
   const { canvas } = template;
+  const theme = getCardTheme(stylePreset, cardIndex);
 
   const renderContent = () => {
     switch (template.htmlTemplateId) {
       case 'quick-knowledge':
-        return <QuickKnowledgeCard content={content} imageUrl={imageUrl} />;
+        return <QuickKnowledgeCard content={content} imageUrl={imageUrl} theme={theme} />;
       case 'encyclopedia':
-        return <EncyclopediaCard content={content} imageUrl={imageUrl} />;
+        return <EncyclopediaCard content={content} imageUrl={imageUrl} theme={theme} />;
       case 'compare-card':
-        return <CompareCard content={content} imageUrl={imageUrl} />;
+        return <CompareCard content={content} imageUrl={imageUrl} theme={theme} />;
+      case 'lifecycle':
+      case 'timeline':
+      case 'process':
+        return <SeriesCard content={content} imageUrl={imageUrl} templateId={template.htmlTemplateId || template.id} theme={theme} cardIndex={cardIndex} />;
       default:
-        return <QuickKnowledgeCard content={content} imageUrl={imageUrl} />;
+        return <QuickKnowledgeCard content={content} imageUrl={imageUrl} theme={theme} />;
     }
   };
 
@@ -64,7 +118,7 @@ export const KnowledgeCardRenderer: React.FC<KnowledgeCardRendererProps> = (prop
       style={{
         width: canvas.width,
         height: canvas.height,
-        backgroundColor: canvas.backgroundColor,
+        backgroundColor: theme.bgPrimary,
         position: 'relative',
         overflow: 'hidden',
         transform: `scale(${scale})`,
@@ -77,27 +131,27 @@ export const KnowledgeCardRenderer: React.FC<KnowledgeCardRendererProps> = (prop
 };
 
 // ============================================================
-// 1. 知识速记卡 - 参考 AI 工具卡片风格
+// 1. 知识速记卡 — 通用结构化知识卡片
 // ============================================================
-const QuickKnowledgeCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ content, imageUrl }) => {
+const QuickKnowledgeCard: React.FC<{ content: CardContent; imageUrl?: string; theme: CardTheme }> = ({ content, imageUrl, theme }) => {
   const modules = content.modules || [];
   const processSteps = content.processSteps || [];
 
   return (
     <div style={{
       width: '100%', height: '100%',
-      background: '#F5F5F0',
-      fontFamily: '"Noto Sans SC", "PingFang SC", sans-serif',
+      background: theme.bgPrimary,
+      fontFamily: theme.fontFamily,
       display: 'flex', flexDirection: 'column',
       padding: '20px 24px 16px',
       position: 'relative',
     }}>
       {/* 顶部系列标识 + 页码 */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <span style={{ fontSize: 11, color: '#999', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+        <span style={{ fontSize: 11, color: theme.textSecondary, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
           {content.seriesName || '知识速记'}
         </span>
-        <span style={{ fontSize: 13, color: '#5B4FC4', fontWeight: 700 }}>
+        <span style={{ fontSize: 13, color: theme.accent, fontWeight: 700 }}>
           {content.episode || '01'}/{content.totalEpisodes || '09'}
         </span>
       </div>
@@ -105,23 +159,23 @@ const QuickKnowledgeCard: React.FC<{ content: CardContent; imageUrl?: string }> 
       {/* 标题区：编号 + 中文标题 + 英文副标题 */}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
         <div style={{
-          background: '#5B4FC4', color: '#fff',
-          fontSize: 22, fontWeight: 700,
-          padding: '6px 14px', borderRadius: 8,
+          background: theme.titleBg, color: '#fff',
+          fontSize: 22, fontWeight: theme.titleWeight,
+          padding: '6px 14px', borderRadius: theme.borderRadius,
           flexShrink: 0, lineHeight: 1.2,
         }}>
           {content.topicNumber || '01'}
         </div>
         <div style={{ flex: 1, paddingTop: 2 }}>
           <h1 style={{
-            fontSize: 24, fontWeight: 700, color: '#1a1a2e',
+            fontSize: 24, fontWeight: theme.titleWeight, color: theme.textPrimary,
             margin: '0 0 2px', lineHeight: 1.2,
           }}>{content.title}</h1>
           {content.englishSubtitle && (
             <p style={{
-              fontSize: 13, color: '#5B4FC4',
+              fontSize: 13, color: theme.accent,
               margin: 0, fontStyle: 'italic',
-              textDecoration: 'underline', textDecorationColor: '#5B4FC4',
+              textDecoration: 'underline', textDecorationColor: theme.accent,
               textDecorationThickness: 2, textUnderlineOffset: 3,
             }}>{content.englishSubtitle}</p>
           )}
@@ -130,23 +184,41 @@ const QuickKnowledgeCard: React.FC<{ content: CardContent; imageUrl?: string }> 
 
       {/* AI配图（如果有） */}
       {imageUrl && (
+        <img
+          src={imageUrl}
+          crossOrigin="anonymous"
+          alt=""
+          style={{
+            width: '100%', height: 100,
+            objectFit: 'cover', objectPosition: 'center',
+            borderRadius: theme.borderRadius, marginBottom: 12,
+          }}
+        />
+      )}
+
+      {/* 正文描述（如果有） */}
+      {content.body && (
         <div style={{
-          width: '100%', height: 100,
-          backgroundImage: `url(${imageUrl})`,
-          backgroundSize: 'cover', backgroundPosition: 'center',
-          borderRadius: 10, marginBottom: 12,
-        }} />
+          background: theme.accentLight,
+          borderLeft: `3px solid ${theme.accent}`,
+          borderRadius: `0 ${theme.borderRadius}px ${theme.borderRadius}px 0`,
+          padding: '8px 12px', marginBottom: 10,
+        }}>
+          <p style={{ fontSize: 13, color: theme.textPrimary, lineHeight: 1.6, margin: 0 }}>
+            {content.body}
+          </p>
+        </div>
       )}
 
       {/* 概念定义（如果有） */}
       {content.definition && (
         <div style={{
-          background: 'rgba(91,79,196,0.06)',
-          borderLeft: '3px solid #5B4FC4',
-          borderRadius: '0 8px 8px 0',
+          background: theme.accentLight,
+          borderLeft: `3px solid ${theme.accent}`,
+          borderRadius: `0 ${theme.borderRadius}px ${theme.borderRadius}px 0`,
           padding: '8px 12px', marginBottom: 10,
         }}>
-          <p style={{ fontSize: 13, color: '#333', lineHeight: 1.6, margin: 0 }}>
+          <p style={{ fontSize: 13, color: theme.textPrimary, lineHeight: 1.6, margin: 0 }}>
             {content.definition}
           </p>
         </div>
@@ -155,14 +227,14 @@ const QuickKnowledgeCard: React.FC<{ content: CardContent; imageUrl?: string }> 
       {/* 知识模块列表 */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8, overflow: 'hidden' }}>
         {modules.map((mod) => {
-          const colors = MODULE_COLORS[mod.type] || MODULE_COLORS.concept;
+          const colors = getModuleColors(theme, mod.type);
           const icon = mod.icon || MODULE_ICONS[mod.type] || '📌';
           return (
             <div key={mod.id} style={{
-              background: '#fff', borderRadius: 10,
+              background: theme.bgSecondary, borderRadius: theme.borderRadius,
               padding: '10px 14px',
               display: 'flex', gap: 10, alignItems: 'flex-start',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+              boxShadow: `0 1px 3px ${theme.shadowColor}`,
               border: `1px solid ${colors.light}`,
             }}>
               <div style={{
@@ -177,7 +249,7 @@ const QuickKnowledgeCard: React.FC<{ content: CardContent; imageUrl?: string }> 
                   margin: '0 0 3px',
                 }}>{mod.title}</h4>
                 {mod.bullets && mod.bullets.length > 0 ? (
-                  <div style={{ fontSize: 12, color: '#555', lineHeight: 1.5 }}>
+                  <div style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.5 }}>
                     {mod.bullets.map((b, i) => (
                       <div key={i} style={{ display: 'flex', gap: 4, marginBottom: 2 }}>
                         <span style={{ color: colors.bg, fontWeight: 700 }}>•</span>
@@ -186,7 +258,7 @@ const QuickKnowledgeCard: React.FC<{ content: CardContent; imageUrl?: string }> 
                     ))}
                   </div>
                 ) : (
-                  <p style={{ fontSize: 12, color: '#555', lineHeight: 1.5, margin: 0 }}>
+                  <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.5, margin: 0 }}>
                     {mod.content}
                   </p>
                 )}
@@ -200,7 +272,7 @@ const QuickKnowledgeCard: React.FC<{ content: CardContent; imageUrl?: string }> 
       {processSteps.length > 0 && (
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          background: 'rgba(91,79,196,0.04)', borderRadius: 8,
+          background: theme.accentLight, borderRadius: theme.borderRadius,
           padding: '8px 12px', marginTop: 8, gap: 4,
         }}>
           {processSteps.map((step, i) => (
@@ -208,14 +280,14 @@ const QuickKnowledgeCard: React.FC<{ content: CardContent; imageUrl?: string }> 
               <div style={{ textAlign: 'center', flex: 1 }}>
                 <div style={{
                   width: 28, height: 28, borderRadius: '50%',
-                  background: MODULE_COLORS[getStepModuleType(i)].bg || '#5B4FC4',
+                  background: getModuleColors(theme, getStepModuleType(i)).bg,
                   color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
                   fontSize: 12, fontWeight: 700, margin: '0 auto 3px',
                 }}>{step.icon || (i + 1)}</div>
-                <p style={{ fontSize: 10, color: '#555', margin: 0, lineHeight: 1.2 }}>{step.label}</p>
+                <p style={{ fontSize: 10, color: theme.textSecondary, margin: 0, lineHeight: 1.2 }}>{step.label}</p>
               </div>
               {i < processSteps.length - 1 && (
-                <span style={{ color: '#5B4FC4', fontSize: 14, fontWeight: 700 }}>→</span>
+                <span style={{ color: theme.accent, fontSize: 14, fontWeight: 700 }}>→</span>
               )}
             </React.Fragment>
           ))}
@@ -238,8 +310,8 @@ const QuickKnowledgeCard: React.FC<{ content: CardContent; imageUrl?: string }> 
       {/* 底部金句栏 */}
       {content.quote && (
         <div style={{
-          background: 'linear-gradient(135deg, #1a1a2e, #2d2d4a)',
-          borderRadius: 8, padding: '10px 14px', marginTop: 8,
+          background: theme.quoteBg,
+          borderRadius: theme.borderRadius, padding: '10px 14px', marginTop: 8,
           display: 'flex', alignItems: 'center', gap: 8,
         }}>
           <span style={{ color: '#F5D547', fontSize: 14, flexShrink: 0 }}>⭐</span>
@@ -257,40 +329,34 @@ const QuickKnowledgeCard: React.FC<{ content: CardContent; imageUrl?: string }> 
         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
           {content.tags.map((tag, i) => (
             <span key={i} style={{
-              fontSize: 10, color: '#999',
-              background: 'rgba(0,0,0,0.04)', padding: '1px 6px', borderRadius: 4,
+              fontSize: 10, color: theme.textSecondary,
+              background: hexToRgba(theme.textPrimary, 0.04), padding: '1px 6px', borderRadius: 4,
             }}>#{tag}</span>
           ))}
         </div>
-        <span style={{ fontSize: 10, color: '#bbb' }}>{content.footer}</span>
+        <span style={{ fontSize: 10, color: theme.textSecondary }}>{content.footer}</span>
       </div>
     </div>
   );
 };
 
-/** 获取流程步骤对应的模块类型颜色 */
-function getStepModuleType(index: number): ModuleType {
-  const types: ModuleType[] = ['concept', 'points', 'process', 'note'];
-  return types[index % types.length];
-}
-
 // ============================================================
-// 2. 百科词条卡 - 结构化信息卡片
+// 2. 百科词条卡 — 结构化信息卡片
 // ============================================================
-const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ content, imageUrl }) => {
+const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string; theme: CardTheme }> = ({ content, imageUrl, theme }) => {
   const modules = content.modules || [];
 
   return (
     <div style={{
       width: '100%', height: '100%',
-      background: '#FAFAFA',
-      fontFamily: '"Noto Sans SC", "PingFang SC", sans-serif',
+      background: theme.bgPrimary,
+      fontFamily: theme.fontFamily,
       display: 'flex', flexDirection: 'column',
       position: 'relative',
     }}>
       {/* 顶部标题栏 */}
       <div style={{
-        background: 'linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)',
+        background: theme.quoteBg,
         padding: '16px 24px 14px',
         flexShrink: 0,
       }}>
@@ -304,7 +370,7 @@ const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = 
           </span>
         </div>
         <h1 style={{
-          fontSize: 28, fontWeight: 700, color: '#fff',
+          fontSize: 28, fontWeight: theme.titleWeight, color: '#fff',
           margin: 0, lineHeight: 1.2,
         }}>{content.title}</h1>
         {content.subtitle && (
@@ -319,18 +385,32 @@ const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {/* 左侧主体 */}
         <div style={{ flex: 1, padding: '14px 16px', overflow: 'hidden' }}>
+          {/* 正文描述 */}
+          {content.body && (
+            <div style={{
+              background: theme.accentLight,
+              borderRadius: theme.borderRadius,
+              padding: '10px 14px', marginBottom: 10,
+              border: theme.cardBorder,
+            }}>
+              <p style={{ fontSize: 13, color: theme.textPrimary, lineHeight: 1.6, margin: 0 }}>
+                {content.body}
+              </p>
+            </div>
+          )}
+
           {/* 概念定义 */}
           {content.definition && (
             <div style={{
-              background: '#fff', borderRadius: 8,
+              background: theme.bgSecondary, borderRadius: theme.borderRadius,
               padding: '10px 14px', marginBottom: 10,
-              border: '1px solid #E5E7EB',
+              border: theme.cardBorder,
             }}>
               <div style={{
-                fontSize: 11, fontWeight: 700, color: '#2563EB',
+                fontSize: 11, fontWeight: 700, color: theme.accent,
                 marginBottom: 4, letterSpacing: '0.05em',
               }}>◆ 概念定义</div>
-              <p style={{ fontSize: 13, color: '#333', lineHeight: 1.6, margin: 0 }}>
+              <p style={{ fontSize: 13, color: theme.textPrimary, lineHeight: 1.6, margin: 0 }}>
                 {content.definition}
               </p>
             </div>
@@ -338,13 +418,13 @@ const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = 
 
           {/* 知识模块 */}
           {modules.map((mod) => {
-            const colors = MODULE_COLORS[mod.type] || MODULE_COLORS.concept;
+            const colors = getModuleColors(theme, mod.type);
             const icon = mod.icon || MODULE_ICONS[mod.type] || '📌';
             return (
               <div key={mod.id} style={{
-                background: '#fff', borderRadius: 8,
+                background: theme.bgSecondary, borderRadius: theme.borderRadius,
                 padding: '10px 14px', marginBottom: 8,
-                border: '1px solid #E5E7EB',
+                border: theme.cardBorder,
               }}>
                 <div style={{
                   display: 'flex', alignItems: 'center', gap: 6, marginBottom: 5,
@@ -358,7 +438,7 @@ const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = 
                   <span style={{ fontSize: 12, fontWeight: 700, color: colors.text }}>{mod.title}</span>
                 </div>
                 {mod.bullets && mod.bullets.length > 0 ? (
-                  <div style={{ fontSize: 12, color: '#555', lineHeight: 1.5, paddingLeft: 4 }}>
+                  <div style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.5, paddingLeft: 4 }}>
                     {mod.bullets.map((b, i) => (
                       <div key={i} style={{ display: 'flex', gap: 4, marginBottom: 2 }}>
                         <span style={{ color: colors.bg }}>•</span>
@@ -367,7 +447,7 @@ const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = 
                     ))}
                   </div>
                 ) : (
-                  <p style={{ fontSize: 12, color: '#555', lineHeight: 1.5, margin: 0, paddingLeft: 4 }}>
+                  <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.5, margin: 0, paddingLeft: 4 }}>
                     {mod.content}
                   </p>
                 )}
@@ -378,7 +458,7 @@ const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = 
           {/* 手写批注 */}
           {content.handwrittenNote && (
             <div style={{
-              background: 'rgba(220,38,38,0.04)', borderRadius: 6,
+              background: hexToRgba('#DC2626', 0.04), borderRadius: 6,
               padding: '6px 10px', marginBottom: 8,
               display: 'flex', gap: 6,
             }}>
@@ -394,32 +474,36 @@ const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = 
         {/* 右侧信息框 */}
         <div style={{
           width: 220, flexShrink: 0,
-          background: '#fff', borderLeft: '1px solid #E5E7EB',
+          background: theme.bgSecondary, borderLeft: theme.cardBorder,
           padding: '14px 12px', overflow: 'hidden',
         }}>
           {/* 配图 */}
           {imageUrl && (
-            <div style={{
-              width: '100%', height: 100,
-              backgroundImage: `url(${imageUrl})`,
-              backgroundSize: 'cover', backgroundPosition: 'center',
-              borderRadius: 6, marginBottom: 10,
-            }} />
+            <img
+              src={imageUrl}
+              crossOrigin="anonymous"
+              alt=""
+              style={{
+                width: '100%', height: 100,
+                objectFit: 'cover', objectPosition: 'center',
+                borderRadius: 6, marginBottom: 10,
+              }}
+            />
           )}
 
           {/* 关键事实 */}
           <div style={{
-            fontSize: 10, fontWeight: 700, color: '#999',
+            fontSize: 10, fontWeight: 700, color: theme.textSecondary,
             marginBottom: 6, letterSpacing: '0.1em',
           }}>关键信息</div>
           {content.tags.map((tag, i) => (
             <div key={i} style={{
               display: 'flex', justifyContent: 'space-between',
-              padding: '4px 0', borderBottom: '1px solid #F3F4F6',
+              padding: '4px 0', borderBottom: `1px solid ${hexToRgba(theme.textPrimary, 0.06)}`,
               fontSize: 11,
             }}>
-              <span style={{ color: '#999' }}>{tag}</span>
-              <span style={{ color: '#333', fontWeight: 500 }}>✓</span>
+              <span style={{ color: theme.textSecondary }}>{tag}</span>
+              <span style={{ color: theme.textPrimary, fontWeight: 500 }}>✓</span>
             </div>
           ))}
 
@@ -427,15 +511,15 @@ const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = 
           {content.highlights && content.highlights.length > 0 && (
             <>
               <div style={{
-                fontSize: 10, fontWeight: 700, color: '#999',
+                fontSize: 10, fontWeight: 700, color: theme.textSecondary,
                 margin: '10px 0 6px', letterSpacing: '0.1em',
               }}>要点速览</div>
               {content.highlights.map((h, i) => (
                 <div key={i} style={{
-                  fontSize: 11, color: '#555', lineHeight: 1.4,
+                  fontSize: 11, color: theme.textSecondary, lineHeight: 1.4,
                   marginBottom: 4, display: 'flex', gap: 4,
                 }}>
-                  <span style={{ color: '#2563EB', fontWeight: 700 }}>{i + 1}.</span>
+                  <span style={{ color: theme.accent, fontWeight: 700 }}>{i + 1}.</span>
                   <span>{h}</span>
                 </div>
               ))}
@@ -447,7 +531,7 @@ const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = 
       {/* 底部金句栏 */}
       {content.quote && (
         <div style={{
-          background: '#1a1a2e',
+          background: theme.quoteBg,
           padding: '10px 24px',
           display: 'flex', alignItems: 'center', gap: 8,
           flexShrink: 0,
@@ -462,9 +546,9 @@ const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = 
       {/* 底部信息 */}
       <div style={{
         padding: '6px 24px',
-        background: '#F3F4F6',
+        background: theme.accentLight,
         display: 'flex', justifyContent: 'space-between',
-        fontSize: 10, color: '#999',
+        fontSize: 10, color: theme.textSecondary,
         flexShrink: 0,
       }}>
         <span>{content.tags.map(t => `#${t}`).join(' ')}</span>
@@ -475,35 +559,31 @@ const EncyclopediaCard: React.FC<{ content: CardContent; imageUrl?: string }> = 
 };
 
 // ============================================================
-// 3. 对比分析卡 - 手账对比风格
+// 3. 对比分析卡 — 手账对比风格
 // ============================================================
-const CompareCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ content, imageUrl }) => {
+const CompareCard: React.FC<{ content: CardContent; imageUrl?: string; theme: CardTheme }> = ({ content, imageUrl, theme }) => {
   const items = content.compareItems || [];
-  const compareColors = [
-    { bg: '#A8D0E6', tape: '#7BA8D4', text: '#2E5C8A' },
-    { bg: '#C5E1A5', tape: '#9AC080', text: '#4A7C3A' },
-    { bg: '#F8BBD0', tape: '#E89B9B', text: '#A04060' },
-  ];
+  const compareColors = getCompareColors(theme);
 
   return (
     <div style={{
       width: '100%', height: '100%',
-      background: '#f5f0e6',
-      fontFamily: '"Noto Sans SC", sans-serif',
+      background: theme.bgPrimary,
+      fontFamily: theme.fontFamily,
       display: 'flex', flexDirection: 'column',
       padding: '28px 24px 20px',
       position: 'relative',
       backgroundImage: `
-        radial-gradient(circle at 20% 80%, rgba(232,168,124,0.06) 0%, transparent 50%),
-        radial-gradient(circle at 80% 20%, rgba(168,200,236,0.06) 0%, transparent 50%),
-        #f5f0e6
+        radial-gradient(circle at 20% 80%, ${hexToRgba(theme.accent, 0.06)} 0%, transparent 50%),
+        radial-gradient(circle at 80% 20%, ${hexToRgba(theme.accentSecondary, 0.06)} 0%, transparent 50%),
+        ${theme.bgPrimary}
       `,
     }}>
       {/* 顶部胶带装饰 */}
       <div style={{
         position: 'absolute', top: 10, left: '30%', width: 100, height: 24,
-        background: 'rgba(244,208,63,0.7)',
-        border: '1px dashed rgba(200,170,50,0.3)',
+        background: hexToRgba(theme.accent, 0.5),
+        border: `1px dashed ${hexToRgba(theme.accent, 0.3)}`,
         transform: 'rotate(-3deg)', borderRadius: 2,
       }} />
 
@@ -512,14 +592,14 @@ const CompareCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ co
         <div style={{ position: 'absolute', left: '15%', top: 0, fontSize: 20 }}>⭐</div>
         <div style={{ position: 'absolute', right: '15%', top: 0, fontSize: 20 }}>⭐</div>
         <h1 style={{
-          fontSize: 26, fontWeight: 800, color: '#2d2d2d',
+          fontSize: 26, fontWeight: 800, color: theme.textPrimary,
           margin: '0 0 4px', lineHeight: 1.3,
         }}>{content.title}</h1>
-        <div style={{ width: 50, height: 3, background: '#f4d03f', margin: '0 auto 6px', borderRadius: 2 }} />
+        <div style={{ width: 50, height: 3, background: theme.accent, margin: '0 auto 6px', borderRadius: 2 }} />
         {content.subtitle && (
           <p style={{
-            fontSize: 14, color: '#666', margin: 0,
-            background: 'rgba(244,208,63,0.15)',
+            fontSize: 14, color: theme.textSecondary, margin: 0,
+            background: hexToRgba(theme.accent, 0.12),
             display: 'inline-block', padding: '2px 10px', borderRadius: 10,
           }}>{content.subtitle}</p>
         )}
@@ -528,11 +608,11 @@ const CompareCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ co
       {/* 概念定义 */}
       {content.definition && (
         <div style={{
-          background: 'rgba(255,255,255,0.6)', borderRadius: 8,
+          background: hexToRgba(theme.textPrimary, 0.04), borderRadius: theme.borderRadius,
           padding: '8px 12px', marginBottom: 12,
-          border: '1px dashed #ccc',
+          border: `1px dashed ${hexToRgba(theme.textPrimary, 0.15)}`,
         }}>
-          <p style={{ fontSize: 12, color: '#555', lineHeight: 1.5, margin: 0 }}>
+          <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.5, margin: 0 }}>
             {content.definition}
           </p>
         </div>
@@ -540,14 +620,31 @@ const CompareCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ co
 
       {/* AI配图 */}
       {imageUrl && (
+        <img
+          src={imageUrl}
+          crossOrigin="anonymous"
+          alt=""
+          style={{
+            width: '100%', height: 90,
+            objectFit: 'cover', objectPosition: 'center',
+            borderRadius: theme.borderRadius, marginBottom: 12,
+            border: `3px solid ${theme.bgSecondary}`,
+            boxShadow: `0 3px 10px ${theme.shadowColor}`,
+          }}
+        />
+      )}
+
+      {/* 正文描述 */}
+      {content.body && (
         <div style={{
-          width: '100%', height: 90,
-          backgroundImage: `url(${imageUrl})`,
-          backgroundSize: 'cover', backgroundPosition: 'center',
-          borderRadius: 10, marginBottom: 12,
-          border: '3px solid #fff',
-          boxShadow: '0 3px 10px rgba(0,0,0,0.1)',
-        }} />
+          background: hexToRgba(theme.textPrimary, 0.04), borderRadius: theme.borderRadius,
+          padding: '8px 12px', marginBottom: 12,
+          border: `1px dashed ${hexToRgba(theme.textPrimary, 0.15)}`,
+        }}>
+          <p style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.5, margin: 0 }}>
+            {content.body}
+          </p>
+        </div>
       )}
 
       {/* 对比卡片 */}
@@ -561,10 +658,10 @@ const CompareCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ co
             const colors = compareColors[i % compareColors.length];
             return (
               <div key={item.id} style={{
-                background: '#fff', borderRadius: 10,
+                background: theme.bgSecondary, borderRadius: theme.borderRadius,
                 padding: '14px 10px 10px',
                 position: 'relative',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+                boxShadow: `0 2px 8px ${theme.shadowColor}`,
                 border: `2px solid ${colors.bg}`,
                 display: 'flex', flexDirection: 'column',
               }}>
@@ -589,12 +686,12 @@ const CompareCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ co
 
                 {/* 标题 */}
                 <h3 style={{
-                  fontSize: 14, fontWeight: 700, color: '#2d2d2d',
+                  fontSize: 14, fontWeight: 700, color: theme.textPrimary,
                   textAlign: 'center', margin: '0 0 6px',
                 }}>{item.label}</h3>
 
                 {/* 特征列表 */}
-                <div style={{ fontSize: 11, color: '#555', lineHeight: 1.5, flex: 1 }}>
+                <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5, flex: 1 }}>
                   {item.features.map((f, j) => (
                     <div key={j} style={{ display: 'flex', gap: 3, marginBottom: 3 }}>
                       <span style={{ color: colors.tape }}>•</span>
@@ -631,10 +728,10 @@ const CompareCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ co
             const colors = compareColors[i % compareColors.length];
             return (
               <div key={mod.id} style={{
-                background: '#fff', borderRadius: 10,
+                background: theme.bgSecondary, borderRadius: theme.borderRadius,
                 padding: '14px 10px 10px',
                 position: 'relative',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.06)',
+                boxShadow: `0 2px 8px ${theme.shadowColor}`,
                 border: `2px solid ${colors.bg}`,
                 display: 'flex', flexDirection: 'column',
               }}>
@@ -651,10 +748,10 @@ const CompareCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ co
                   fontSize: 16, margin: '0 auto 6px',
                 }}>{mod.icon || MODULE_ICONS[mod.type]}</div>
                 <h3 style={{
-                  fontSize: 13, fontWeight: 700, color: '#2d2d2d',
+                  fontSize: 13, fontWeight: 700, color: theme.textPrimary,
                   textAlign: 'center', margin: '0 0 6px',
                 }}>{mod.title}</h3>
-                <div style={{ fontSize: 11, color: '#555', lineHeight: 1.5, flex: 1 }}>
+                <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.5, flex: 1 }}>
                   {mod.content}
                 </div>
               </div>
@@ -666,10 +763,10 @@ const CompareCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ co
       {/* 手写批注 */}
       {content.handwrittenNote && (
         <div style={{ marginTop: 10, textAlign: 'center' }}>
-          <div style={{ fontSize: 14, color: '#f4c2c2', marginBottom: 2 }}>〰️〰️〰️</div>
+          <div style={{ fontSize: 14, color: hexToRgba('#DC2626', 0.4), marginBottom: 2 }}>〰️〰️〰️</div>
           <p style={{
-            fontSize: 13, color: '#e89b9b', fontWeight: 500,
-            textDecoration: 'underline', textDecorationColor: '#f4c2c2',
+            fontSize: 13, color: '#DC2626', fontWeight: 500,
+            textDecoration: 'underline', textDecorationColor: hexToRgba('#DC2626', 0.4),
             margin: 0,
             fontFamily: '"Ma Shan Zheng", cursive',
           }}>{content.handwrittenNote}</p>
@@ -683,13 +780,193 @@ const CompareCard: React.FC<{ content: CardContent; imageUrl?: string }> = ({ co
         <div style={{ display: 'flex', gap: 4 }}>
           {content.tags.map((tag, i) => (
             <span key={i} style={{
-              fontSize: 10, color: '#999',
-              border: '1px dashed #ccc', padding: '1px 6px', borderRadius: 8,
-              background: 'rgba(244,208,63,0.1)',
+              fontSize: 10, color: theme.textSecondary,
+              border: `1px dashed ${hexToRgba(theme.textPrimary, 0.2)}`, padding: '1px 6px', borderRadius: 8,
+              background: hexToRgba(theme.accent, 0.08),
             }}>#{tag}</span>
           ))}
         </div>
-        <span style={{ fontSize: 10, color: '#bbb' }}>{content.footer}</span>
+        <span style={{ fontSize: 10, color: theme.textSecondary }}>{content.footer}</span>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+// 4. 系列卡片 — 生命周期/时间线/流程（AI图全幅背景+文字叠加）
+// ============================================================
+const SeriesCard: React.FC<{ content: CardContent; imageUrl?: string; templateId: string; theme: CardTheme; cardIndex: number }> = ({ content, imageUrl, theme, cardIndex }) => {
+  const modules = content.modules || [];
+  const overlayColor = theme.quoteBg;
+
+  return (
+    <div style={{
+      width: '100%', height: '100%',
+      position: 'relative',
+      fontFamily: theme.fontFamily,
+      overflow: 'hidden',
+      backgroundColor: theme.bgPrimary,
+    }}>
+      {/* ===== AI 图片全幅背景（用 img 标签，html-to-image 才能捕获） ===== */}
+      {imageUrl && (
+        <img
+          src={imageUrl}
+          crossOrigin="anonymous"
+          alt=""
+          style={{
+            position: 'absolute', inset: 0,
+            width: '100%', height: '100%',
+            objectFit: 'cover',
+            objectPosition: 'center',
+          }}
+        />
+      )}
+      {/* 渐变遮罩 — 使用主题 quoteBg 派生，保证文字可读性 */}
+      {imageUrl && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          background: `linear-gradient(to bottom, ${hexToRgba(overlayColor, 0.35)} 0%, transparent 20%, transparent 55%, ${hexToRgba(overlayColor, 0.55)} 72%, ${hexToRgba(overlayColor, 0.88)} 100%)`,
+        }} />
+      )}
+
+      {/* ===== 顶部标题区 ===== */}
+      <div style={{
+        position: 'relative', zIndex: 2,
+        padding: '24px 28px 12px',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+          <div style={{
+            background: imageUrl ? theme.bgOverlay : theme.titleBg,
+            color: imageUrl ? theme.accent : '#fff',
+            fontSize: 20, fontWeight: theme.titleWeight,
+            padding: '5px 12px', borderRadius: theme.borderRadius,
+            flexShrink: 0, lineHeight: 1.2,
+            boxShadow: imageUrl ? `0 2px 8px ${theme.shadowColor}` : 'none',
+          }}>
+            {content.topicNumber || '01'}
+          </div>
+          <div>
+            <h1 style={{
+              fontSize: 24, fontWeight: theme.titleWeight,
+              color: '#fff',
+              margin: '0 0 2px', lineHeight: 1.2,
+              textShadow: `0 2px 10px ${hexToRgba(overlayColor, 0.7)}`,
+            }}>{content.title}</h1>
+            {content.subtitle && (
+              <p style={{
+                fontSize: 13,
+                color: 'rgba(255,250,240,0.92)',
+                margin: 0,
+                textShadow: `0 1px 6px ${hexToRgba(overlayColor, 0.6)}`,
+              }}>{content.subtitle}</p>
+            )}
+          </div>
+        </div>
+        <span style={{
+          fontSize: 12, fontWeight: 600,
+          color: 'rgba(255,250,240,0.75)',
+          textShadow: `0 1px 6px ${hexToRgba(overlayColor, 0.6)}`,
+        }}>{content.seriesName}</span>
+      </div>
+
+      {/* ===== 底部内容叠加区 ===== */}
+      <div style={{
+        position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 2,
+        padding: '16px 24px 14px',
+        display: 'flex', flexDirection: 'column', gap: 8,
+      }}>
+        {/* 正文描述 */}
+        {content.body && (
+          <div style={{
+            background: theme.bgOverlay,
+            borderRadius: theme.borderRadius,
+            padding: '10px 14px',
+            boxShadow: `0 2px 10px ${theme.shadowColor}`,
+            borderLeft: `3px solid ${theme.accent}`,
+          }}>
+            <p style={{
+              fontSize: 12, color: theme.textPrimary, lineHeight: 1.7, margin: 0,
+              fontWeight: 500,
+            }}>{content.body}</p>
+          </div>
+        )}
+
+        {/* 知识模块 — 半透明卡片 */}
+        {modules.map((mod) => {
+          const colors = getModuleColors(theme, mod.type);
+          const icon = mod.icon || MODULE_ICONS[mod.type] || '📌';
+          return (
+            <div key={mod.id} style={{
+              background: theme.bgOverlay,
+              borderRadius: theme.borderRadius,
+              padding: '8px 12px',
+              display: 'flex', gap: 10, alignItems: 'flex-start',
+              boxShadow: `0 2px 10px ${theme.shadowColor}`,
+              borderLeft: `3px solid ${colors.bg}`,
+            }}>
+              <div style={{
+                width: 26, height: 26, borderRadius: '50%',
+                background: colors.bg, color: '#fff',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 12, flexShrink: 0,
+              }}>{icon}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <h4 style={{
+                  fontSize: 12, fontWeight: 700, color: colors.text,
+                  margin: '0 0 2px',
+                }}>{mod.title}</h4>
+                {mod.bullets && mod.bullets.length > 0 ? (
+                  <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.4 }}>
+                    {mod.bullets.map((b, i) => (
+                      <div key={i} style={{ display: 'flex', gap: 4, marginBottom: 1 }}>
+                        <span style={{ color: colors.bg, fontWeight: 700 }}>•</span>
+                        <span>{b}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.4, margin: 0 }}>
+                    {mod.content}
+                  </p>
+                )}
+              </div>
+            </div>
+          );
+        })}
+
+        {/* 金句栏 */}
+        {content.quote && (
+          <div style={{
+            background: hexToRgba(theme.quoteBg, 0.88),
+            borderRadius: theme.borderRadius, padding: '8px 14px',
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+            <span style={{ color: '#F5D547', fontSize: 13, flexShrink: 0 }}>⭐</span>
+            <span style={{ color: '#fff', fontSize: 12, fontWeight: 600, lineHeight: 1.4 }}>
+              {content.quote}
+            </span>
+          </div>
+        )}
+
+        {/* 底部标签栏 */}
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {content.tags.map((tag, i) => (
+              <span key={i} style={{
+                fontSize: 9, color: 'rgba(255,250,240,0.85)',
+                background: hexToRgba(overlayColor, 0.4),
+                padding: '1px 6px', borderRadius: 4,
+              }}>#{tag}</span>
+            ))}
+          </div>
+          <span style={{
+            fontSize: 9,
+            color: 'rgba(255,250,240,0.6)',
+          }}>{content.footer}</span>
+        </div>
       </div>
     </div>
   );

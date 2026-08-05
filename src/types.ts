@@ -1,8 +1,13 @@
 /**
- * AI知识卡片生成系统 - 核心类型定义
+ * AI 信息图工作室 - 核心类型定义 (V2)
+ * 基于产品分析文档：五阶段全链路工作流
+ * 知识检索 → 内容生成 → Prompt工程 → AI出图 → HTML排版导出
  */
 
-/** 知识模块类型 - 对应知识卡片中的各类信息区块 */
+// ============================================================
+// Part 1: 知识模块类型（兼容V1，知识卡片中的信息区块）
+// ============================================================
+
 export type ModuleType =
   | 'concept'    // 概念定义
   | 'points'     // 核心要点
@@ -15,86 +20,100 @@ export type ModuleType =
   | 'compare'    // 对比项
   | 'fact';      // 关键事实
 
-/** 知识模块 - 知识卡片的核心信息单元 */
 export interface KnowledgeModule {
   id: string;
   type: ModuleType;
   title: string;
-  /** 正文内容 */
   content: string;
-  /** 要点列表（适合"核心要点"等模块） */
   bullets?: string[];
-  /** 图标 emoji */
   icon?: string;
 }
 
-/** 流程步骤 - 用于流程可视化 */
 export interface ProcessStep {
   id: string;
   label: string;
   icon?: string;
 }
 
-/** 对比项 - 用于对比类卡片 */
 export interface CompareItem {
   id: string;
   label: string;
-  /** 选项标识（如 A/B/C） */
   badge?: string;
-  /** 颜色主题 */
   color?: string;
-  /** 特征列表 */
   features: string[];
-  /** 适用人群 */
   suitableFor?: string;
 }
 
-/** 卡片内容数据 */
-export interface CardContent {
-  // ===== 基础信息 =====
-  title: string;
-  subtitle: string;
-  body: string;
-  footer: string;
-  tags: string[];
+// ============================================================
+// Part 2: Stage 1 — 知识检索输出
+// ============================================================
 
-  // ===== 系列信息 =====
-  /** 系列名称（如"知识速记"） */
-  seriesName?: string;
-  /** 当前期号（如"03"） */
-  episode?: string;
-  /** 总期数（如"09"） */
-  totalEpisodes?: string;
-  /** 主题编号（如"01"） */
-  topicNumber?: string;
-  /** 英文副标题 */
-  englishSubtitle?: string;
-
-  // ===== 结构化知识内容 =====
-  /** 概念定义（一段话描述） */
-  definition?: string;
-  /** 知识模块列表 */
-  modules?: KnowledgeModule[];
-  /** 流程步骤 */
-  processSteps?: ProcessStep[];
-  /** 对比项列表 */
-  compareItems?: CompareItem[];
-
-  // ===== 辅助内容 =====
-  /** 手写批注（红色手写体） */
-  handwrittenNote?: string;
-  /** 底部金句 */
-  quote?: string;
-  /** 要点列表 */
-  highlights?: string[];
-  /** 章节编号 */
-  chapter?: string;
-
-  // ===== 兼容旧字段 =====
-  sections?: ContentSection[];
+/** 知识事实条目 */
+export interface KnowledgeFact {
+  label: string;
+  value: string;
 }
 
-/** 旧版内容区块（兼容） */
+/** 生命周期阶段数据（lifecycle 模板专用） */
+export interface LifecycleStage {
+  id: string;
+  name: string;       // 阶段名称，如"新生期"
+  period: string;     // 时间段，如"0–2周"
+  description: string; // 阶段描述
+  features: string[];  // 外观/行为特征
+  trivia?: string;     // 小知识
+}
+
+/** 时间线事件数据（timeline 模板专用） */
+export interface TimelineEvent {
+  id: string;
+  year: string;        // 年份/时间标记
+  title: string;       // 事件标题
+  description: string; // 事件描述
+  significance?: string; // 历史意义
+}
+
+/** 流程步骤数据（process 模板专用） */
+export interface ProcessStepData {
+  id: string;
+  order: number;
+  title: string;
+  description: string;
+  tip?: string;
+}
+
+/** 对比数据（comparison 模板专用） */
+export interface CompareData {
+  id: string;
+  label: string;
+  features: string[];
+  pros: string[];
+  cons: string[];
+  suitableFor: string;
+}
+
+/** 知识库 — Stage 1 的完整输出 */
+export interface KnowledgeBase {
+  topic: string;
+  summary: string;
+  category: string;
+  tags: string[];
+  facts: KnowledgeFact[];
+  keyPoints: string[];
+  // 模板专用结构化数据
+  lifecycleStages?: LifecycleStage[];
+  timelineEvents?: TimelineEvent[];
+  processSteps?: ProcessStepData[];
+  compareData?: CompareData[];
+  // 英文主题翻译（用于Prompt）
+  englishTopic?: string;
+}
+
+// ============================================================
+// Part 3: Stage 2 — 卡片内容
+// ============================================================
+
+/** 旧版内容区块（兼容V1） */
 export interface ContentSection {
   id: string;
   title: string;
@@ -103,7 +122,201 @@ export interface ContentSection {
   index?: number;
 }
 
-/** AI图片生成提示词配置 */
+/** 卡片内容数据 — Stage 2 的输出 */
+export interface CardContent {
+  // 基础信息
+  title: string;
+  subtitle: string;
+  body: string;
+  footer: string;
+  tags: string[];
+
+  // 系列信息
+  seriesName?: string;
+  episode?: string;
+  totalEpisodes?: string;
+  topicNumber?: string;
+  englishSubtitle?: string;
+
+  // 结构化知识内容
+  definition?: string;
+  modules?: KnowledgeModule[];
+  processSteps?: ProcessStep[];
+  compareItems?: CompareItem[];
+
+  // 辅助内容
+  handwrittenNote?: string;
+  quote?: string;
+  highlights?: string[];
+  chapter?: string;
+
+  // 兼容旧字段
+  sections?: ContentSection[];
+}
+
+// ============================================================
+// Part 4: Stage 3 — 六段式纯画面 Prompt
+// ============================================================
+
+/** 六段式 Prompt 结构（纯画面，无中文文字） */
+export interface VisualPrompt {
+  /** 1. 画面基调 — 视觉风格、底色、质感 */
+  style: string;
+  /** 2. 布局骨架 — 画面分区结构（只描述形状，不写文字） */
+  layout: string;
+  /** 3. 主视觉插画 — 核心主体的详细描述 */
+  mainVisual: string;
+  /** 4. 辅助插画 — 圆形特写、小图标、装饰元素 */
+  auxiliary: string;
+  /** 5. 留白区定义 — 哪些区域留空（用于HTML叠文字），百分比位置 */
+  whitespace: string;
+  /** 6. 装饰收尾 — 边框、印章、底部装饰 */
+  decoration: string;
+  /** 氛围描述 — 光线、构图角度、情绪（英文，按卡片序号变化） */
+  atmosphere?: string;
+  /** 负面提示词 */
+  negative: string;
+  /** Stage 0: 内容关系判定结果（P0新增） */
+  contentRelation?: ContentAnalysis;
+  /** P1新增: 信息预算安全区量化约束 */
+  safetyZone?: string;
+}
+
+/**
+ * P0: 内容关系分析结果
+ * 描述当前卡片的内容关系类型及对应的视觉策略
+ */
+export interface ContentAnalysis {
+  /** 内容关系类型 */
+  relationType: ContentRelationType;
+  /** 画面焦点描述（英文） */
+  visualFocus: string;
+  /** 场景情绪基调（英文） */
+  sceneMood: string;
+  /** 构图提示（英文） */
+  compositionHint: string;
+  /** 选择理由（英文，用于可解释性） */
+  reason: string;
+}
+
+/** 内容关系类型（13种标准关系 + 通用） */
+export type ContentRelationType =
+  | 'birth'           // 新生/萌芽 — 脆弱、温暖、俯视保护
+  | 'growth'          // 成长/发展 — 进取、动态、侧面视角
+  | 'peak'            // 巅峰/繁盛 — 壮观、高对比、环境全景
+  | 'decline'         // 衰退/衰老 — 沉稳、暮色、大远景
+  | 'event'           // 历史事件 — 戏剧性、时代感、中景
+  | 'action'          // 操作流程 — 清晰、指令性、特写
+  | 'comparison'      // 对比分析 — 并列、平衡、对称
+  | 'classification'  // 分类归纳 — 结构化、层次分明
+  | 'process'         // 流程推进 — 顺序性、递进感
+  | 'generic';        // 通用 — 默认策略
+
+// ============================================================
+// Part 5: 风格预设
+// ============================================================
+
+export interface StylePreset {
+  id: string;
+  name: string;
+  nameEn: string;
+  /** Prompt 风格描述（英文） */
+  stylePrompt: string;
+  /** 底色描述 */
+  baseColor: string;
+  /** 质感描述 */
+  texture: string;
+  /** 配色方案 */
+  palette: string[];
+  /** P2新增: 100% 固定约束（品牌一致性，永不改变） */
+  fixedConstraints?: string;
+  /** P2新增: 100% 动态插槽（根据内容关系动态填充） */
+  dynamicSlots?: string[];
+}
+
+// ============================================================
+// Part 6: 卡片与项目数据模型
+// ============================================================
+
+/** 单张卡片的完整数据（贯穿五阶段） */
+export interface CardData {
+  id: number;
+  /** 阶段标题，如"01 新生期" */
+  stage: string;
+  /** 副标题，如"0–2周 · 破壳与依偎" */
+  subtitle: string;
+
+  // 各阶段产物
+  knowledge?: KnowledgeBase;    // Stage 1
+  content?: CardContent;        // Stage 2
+  prompt?: VisualPrompt;        // Stage 3
+  imageUrl?: string;            // Stage 4
+  imageStatus?: 'pending' | 'generating' | 'done' | 'error';
+  imageError?: string;
+}
+
+/** 项目 — 一个主题下多张卡片的集合 */
+export interface CardProject {
+  name: string;
+  topic: string;
+  templateId: string;
+  stylePresetId: string;
+  cards: CardData[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ============================================================
+// Part 7: 工作流与状态
+// ============================================================
+
+/** 五阶段工作流步骤 */
+export type WorkflowStage =
+  | 'input'              // 输入主题
+  | 'generating-knowledge' // Stage 1 执行中
+  | 'review-knowledge'  // Stage 1 审校
+  | 'generating-content' // Stage 2 执行中
+  | 'review-content'    // Stage 2 审校
+  | 'generating-prompt' // Stage 3 执行中
+  | 'review-prompt'     // Stage 3 审校
+  | 'generating-image'  // Stage 4 执行中
+  | 'review-image'      // Stage 4 审校
+  | 'typeset'           // Stage 5 排版导出
+  | 'done';
+
+/** 当前激活的阶段编号（1-5） */
+export type StageNumber = 1 | 2 | 3 | 4 | 5;
+
+// ============================================================
+// Part 8: AI 服务配置
+// ============================================================
+
+/**
+ * AI 服务配置
+ * 注意：API Key 由服务端代理持有，不暴露给前端
+ */
+export interface AIConfig {
+  baseURL: string;
+  textModel: string;
+  imageModel: string;
+  imageSize: string;
+  /** 图片宽高比 */
+  imageRatio?: string;
+}
+
+/** @deprecated 兼容旧引用 */
+export type AIImageConfig = AIConfig;
+/** @deprecated 兼容旧引用 */
+export type AITextConfig = AIConfig;
+
+// ============================================================
+// Part 9: 模板配置（兼容V1 + V2扩展）
+// ============================================================
+
+/** 渲染器类型 */
+export type RendererType = 'layer' | 'html' | 'knowledge' | 'lifecycle' | 'timeline' | 'process';
+
+/** 旧版 Prompt 配置（兼容V1） */
 export interface PromptConfig {
   style: string;
   subject: string;
@@ -113,15 +326,12 @@ export interface PromptConfig {
   quality: string;
 }
 
-/** 渲染器类型 */
-export type RendererType = 'layer' | 'html' | 'knowledge';
-
 /** 卡片模板配置 */
 export interface CardTemplate {
   id: string;
   name: string;
   description: string;
-  category: 'quick' | 'encyclopedia' | 'compare' | 'guofeng' | 'modern' | 'minimal' | 'scroll' | 'handcraft' | 'tech' | 'nature';
+  category: 'quick' | 'encyclopedia' | 'compare' | 'guofeng' | 'modern' | 'minimal' | 'scroll' | 'handcraft' | 'tech' | 'nature' | 'lifecycle' | 'timeline' | 'process';
   canvas: {
     width: number;
     height: number;
@@ -131,12 +341,12 @@ export interface CardTemplate {
   renderer: RendererType;
   layers?: TemplateLayer[];
   htmlTemplateId?: string;
+  /** V2: 模板适用的卡片数量（系列模板>1） */
+  cardCount?: number;
 }
 
-/** 模板图层类型 */
 export type LayerType = 'image' | 'text' | 'box' | 'tag';
 
-/** 模板图层配置 */
 export interface TemplateLayer {
   type: LayerType;
   id: string;
@@ -161,22 +371,10 @@ export interface TemplateLayer {
   backdropFilter?: string;
 }
 
-/** AI图片生成服务配置 */
-export interface AIImageConfig {
-  provider: 'mock' | 'tongyi' | 'wenxin';
-  apiKey?: string;
-  size: string;
-  mode: 'fast' | 'quality';
-}
+// ============================================================
+// Part 10: AI 生成结果（兼容V1）
+// ============================================================
 
-/** AI文本生成服务配置 */
-export interface AITextConfig {
-  provider: 'mock' | 'qianwen' | 'deepseek' | 'zhipu';
-  apiKey?: string;
-  model?: string;
-}
-
-/** AI生成的内容结果 */
 export interface AIGeneratedContent {
   title: string;
   subtitle: string;
@@ -184,8 +382,6 @@ export interface AIGeneratedContent {
   tags: string[];
   imagePrompt: string;
   summary: string;
-
-  // 结构化知识内容
   seriesName?: string;
   episode?: string;
   totalEpisodes?: string;
@@ -197,20 +393,16 @@ export interface AIGeneratedContent {
   compareItems?: CompareItem[];
   handwrittenNote?: string;
   quote?: string;
-
-  // 兼容旧字段
   sections?: ContentSection[];
   highlights?: string[];
   chapter?: string;
 }
 
-/** 工作流步骤 */
+/** @deprecated 旧工作流步骤，保留兼容 */
 export type WorkflowStep = 'input' | 'generating-content' | 'review-content' | 'generating-image' | 'done';
 
-/** 生成状态 */
 export type GenerationStatus = 'idle' | 'generating-content' | 'generating-prompt' | 'generating-image' | 'rendering' | 'done' | 'error';
 
-/** 生成结果 */
 export interface GenerationResult {
   status: GenerationStatus;
   imageUrl?: string;
