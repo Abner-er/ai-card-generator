@@ -599,8 +599,8 @@ const App: React.FC = () => {
   // ===== 渲染卡片 =====
   const renderCard = () => {
     if (activeCard && activeCard.design && activeCard.designStatus === 'done') {
-      // AI 设计已就绪：使用自适应渲染器
-      return <AdaptiveCardRenderer card={activeCard} stylePreset={selectedStylePreset} cardIndex={activeCardIndex} cardTotal={cards.length} width={selectedTemplate.canvas.width} height={selectedTemplate.canvas.height} />;
+      // AI 设计已就绪：使用自适应渲染器（传入 scale 和 innerRef 用于导出）
+      return <AdaptiveCardRenderer card={activeCard} stylePreset={selectedStylePreset} cardIndex={activeCardIndex} cardTotal={cards.length} scale={previewScale} innerRef={cardRef} />;
     }
     // Fallback: 旧版渲染器（图片未设计时）
     const content = activeContent;
