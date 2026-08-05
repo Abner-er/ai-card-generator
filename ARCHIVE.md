@@ -20,7 +20,7 @@
 ## 二、五阶段工作流
 
 ```
-输入主题 → 知识检索(STG1) → 内容生成(STG2) → Prompt工程(STG3) → AI出图(STG4) → 排版导出(STG5)
+输入主题 → 知识检索(STG1) → 内容生成(STG2) → Prompt工程(STG3) → AI出图(STG4) → AI卡片设计(STG4.5) → 排版导出(STG5)
 ```
 
 ### Stage 1 — 知识检索
@@ -215,11 +215,55 @@ analyzeContentRelation() → ContentAnalysis
 | `VITE_TEXT_MODEL` | `agnes-2.5-flash` | 文本模型名称 |
 | `VITE_IMAGE_MODEL` | `agnes-image-2.1-flash` | 图像模型名称 |
 | `VITE_IMAGE_SIZE` | `1024x1536` | 图片尺寸 |
-| `VITE_USE_MOCK` | `false` | 是否启用 Mock 模式 |
+|- `VITE_USE_MOCK` | `false` | 是否启用 Mock 模式
 
 ---
 
-## 九、启动与构建
+## 九、P4 — AI原生卡片设计架构（Stage 4.5）
+
+### 背景
+旧方案使用固定 TemplateLayer + 绝对定位，卡片排版千篇一律，无法根据生成图片的构图做差异化设计。
+
+### 新架构
+**两阶段设计流程：**
+1. **Vision API 分析构图**（`analyzeComposition()`）：
+   - 主体位置（left/right/center/top/bottom/scattered）
+   - 留白区域（top/left/right/bottom/center）
+   - 主色调（dominantColor）
+   - 氛围（mood）
+   - 光线方向（lightDirection）
+   - 构图风格（compositionStyle）
+
+2. **AI 生成自适应 HTML 卡片**（`generateCardDesign()`）：
+   - 根据留白区域决定布局类型（left-text / right-text / bottom-text / floating / split）
+   - 根据主色调和风格预设生成配色
+   - 根据内容和知识数据生成完整 HTML（含图片、标题、正文、标签、页脚）
+   - 使用 Tailwind CSS 类，输出干净的卡片 div
+
+### 核心文件
+| 文件 | 说明 |
+|------|------|
+| `src/services/cardDesignService.ts` | CardDesignService 核心服务 |
+| `src/components/AdaptiveCardRenderer.tsx` | 自适应渲染器（AI设计优先） |
+| `src/types.ts` | CardDesignOutput / designStatus / StageNumber 4.5 |
+
+### 类型定义
+```typescript
+interface CardDesignOutput {
+  layout: 'left-text' | 'right-text' | 'bottom-text' | 'center-text' | 'split' | 'floating';
+  colors: { bg: string; text: string; accent: string; secondary: string; };
+  html: string;
+  designDescription: string;
+}
+```
+
+### 降级策略
+- AI 设计失败 → 自动生成 fallback HTML（基于留白区域判断基础布局）
+- 无 design 数据 → fallback 到旧模板渲染器（TemplateLayer）
+
+---
+
+## 十、环境变量
 
 ```bash
 # 安装依赖
@@ -247,12 +291,12 @@ npm run preview
 
 ---
 
-## 十一、文件结构
+## 十二、文件结构
 
 ```
 ai-card-generator/
 ├── src/
-│   ├── App.tsx                    # 主应用：五阶段工作流状态管理
+│   ├── App.tsx                    # 主应用：六阶段工作流状态管理（含 Stage 4.5）
 │   ├── main.tsx                   # 入口
 │   ├── style.css                  # Tailwind 指令 + 全局样式
 │   ├── types.ts                   # 全部 TypeScript 类型定义
@@ -260,13 +304,15 @@ ai-card-generator/
 │   │   ├── CardRenderer.tsx       # 默认渲染器
 │   │   ├── KnowledgeCardRenderer.tsx  # 系列模板渲染器（lifecycle/timeline/process）
 │   │   ├── RichCardRenderer.tsx   # HTML 模板渲染器
-│   │   └── TemplatePreview.tsx    # 模板预览组件
+│   │   ├── TemplatePreview.tsx    # 模板预览组件
+│   │   └── AdaptiveCardRenderer.tsx  # ★ P4 自适应渲染器（AI设计优先）
 │   ├── services/
 │   │   ├── promptBuilder.ts       # ★ 六段式 Prompt 引擎（P0-P3）
 │   │   ├── aiPromptRewriter.ts    # ★ AI 改写器（P3）
 │   │   ├── knowledgeService.ts    # 知识检索服务
 │   │   ├── contentService.ts      # 内容生成服务
 │   │   ├── imageService.ts        # 图像生成服务
+│   │   ├── cardDesignService.ts   # ★ P4 AI卡片设计服务（Vision API）
 │   │   ├── exportService.ts       # PNG/ZIP 导出服务
 │   │   ├── projectService.ts      # 项目保存/加载
 │   │   └── styleEngine.ts         # 视觉风格引擎
@@ -282,5 +328,5 @@ ai-card-generator/
 ---
 
 *归档日期：2026-08-05*
-*Git Tag：v2.0.0 | Commit：358059a*
-*最后更新：P0-P3 全部实现完成，TypeScript 编译通过，版本已备份*
+*Git Tag：v3.0.0 | Commit：aecd5a8*
+*最后更新：P4 AI原生卡片设计架构（Stage 4.5）实现完成，Vision API 分析构图 + AI生成自适应HTML卡片*
