@@ -32,7 +32,7 @@ const EMPTY_CONTENT: CardContent = {
   title: '', subtitle: '', body: '', footer: '', tags: [],
 };
 
-// 五阶段定义（含 Stage 4.5 AI 卡片设计）
+// 六阶段定义（含 Stage 4.5 AI 卡片设计）
   const STAGES: { num: StageNumber; key: string; label: string; icon: string }[] = [
     { num: 1, key: 'knowledge', label: '知识检索', icon: '🔍' },
     { num: 2, key: 'content', label: '内容生成', icon: '✍️' },

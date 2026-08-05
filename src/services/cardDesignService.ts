@@ -9,15 +9,14 @@ import type {
 } from '../types';
 
 /**
- * Stage 4.5 — AI 卡片设计服务（方案 A：Vision API）
+ * Stage 4.5 — AI 卡片设计服务
  *
  * 核心流程：
- * 1. 分析图片构图（vision API）→ 主体位置 / 留白区域 / 氛围
- * 2. 基于分析结果 + 内容数据 → AI 生成自适应 HTML 卡片
- * 3. 返回完整设计（布局 / 配色 / HTML）
+ * 1. Vision API 分析图片构图（主体位置 / 留白区域 / 主色调 / 氛围）
+ * 2. AI 提炼简化知识内容（2-3个关键要点，每条一句话）
+ * 3. AI 基于构图 + 简化内容 → 生成美化自适应 HTML 卡片
  *
- * 替代旧方案：固定模板（TemplateLayer 绝对定位）→ 卡片千篇一律
- * 新方案：AI 自主决定每张卡片的布局、配色、层次 → 每张卡独一无二
+ * 与固定模板的核心区别：每张卡片的布局、配色、层次都由 AI 根据图片内容自主决定
  */
 export class CardDesignService {
   private config: AIConfig;
@@ -31,12 +30,8 @@ export class CardDesignService {
   }
 
   /**
-   * 核心方法：基于图片和内容生成 AI 卡片设计
-   * @param imageUrl 已生成的图片（base64 或 URL）
-   * @param knowledge 知识数据（用于理解主题）
-   * @param content 卡片内容（标题、正文、标签）
-   * @param stylePreset 风格预设（用于提示词）
-   * @param onProgress 进度回调（通知 App 更新 stage / card.designStatus）
+   * 核心方法：基于图片和知识数据生成 AI 卡片设计
+   * 输出：完整的 HTML 卡片 + 布局信息 + 配色方案
    */
   async designCard(
     imageUrl: string,
@@ -52,7 +47,7 @@ export class CardDesignService {
 
     const composition = await this.analyzeComposition(imageUrl, cardIndex, cardTotal);
 
-    // Step 2: 基于分析结果生成卡片设计
+    // Step 2: 基于分析结果生成卡片设计（含知识提炼 + HTML 生成）
     const design = await this.generateCardDesign(composition, knowledge, content, stylePreset, cardIndex, imageUrl);
 
     return design;
@@ -60,7 +55,6 @@ export class CardDesignService {
 
   /**
    * Step 1: 分析图片构图
-   * 使用 vision API（文本模型 + image_url）分析图片的视觉特征
    */
   private async analyzeComposition(
     imageUrl: string,
@@ -71,8 +65,6 @@ export class CardDesignService {
     emptySpace: string;
     dominantColor: string;
     mood: string;
-    lightDirection: string;
-    compositionStyle: string;
   }> {
     const systemPrompt = `You are a professional art director analyzing illustration compositions for knowledge cards.
 
@@ -81,12 +73,10 @@ Analyze the visual composition of the image and return a JSON with:
 - emptySpace: where the largest empty/negative space is (left/right/top/bottom/scattered)
 - dominantColor: the main color of the image (hex or color name)
 - mood: the overall mood (serene/energetic/dramatic/peaceful/vibrant/mysterious)
-- lightDirection: where light comes from (top/bottom/left/right/centered)
-- compositionStyle: the composition style (portrait/landscape/close-up/wide/detail)
 
 Output ONLY valid JSON, no markdown, no explanation.`;
 
-    const userPrompt = `Analyze the composition of this knowledge card illustration:
+    const userPrompt = `Analyze the composition of this knowledge card illustration.
 Card ${cardIndex + 1} of ${cardTotal} in the series.
 Focus on: subject placement, negative space distribution, dominant color, and overall mood.`;
 
@@ -99,27 +89,23 @@ Focus on: subject placement, negative space distribution, dominant color, and ov
           emptySpace: string;
           dominantColor: string;
           mood: string;
-          lightDirection: string;
-          compositionStyle: string;
         };
       }
     } catch (err) {
       console.warn('[CardDesignService] Vision analysis failed:', err);
     }
 
-    // Fallback: 默认值（empty space 在左侧，适合文字）
     return {
       subjectPosition: 'right',
       emptySpace: 'left',
       dominantColor: '#f5f0e6',
       mood: 'serene',
-      lightDirection: 'top',
-      compositionStyle: 'portrait',
     };
   }
 
   /**
-   * Step 2: 基于构图分析 + 内容生成完整卡片 HTML
+   * Step 2: 提炼知识内容 + 生成美化 HTML
+   * AI 角色：知识编辑 + 视觉设计师
    */
   private async generateCardDesign(
     composition: {
@@ -127,8 +113,6 @@ Focus on: subject placement, negative space distribution, dominant color, and ov
       emptySpace: string;
       dominantColor: string;
       mood: string;
-      lightDirection: string;
-      compositionStyle: string;
     },
     knowledge: KnowledgeBase,
     content: CardContent,
@@ -136,73 +120,87 @@ Focus on: subject placement, negative space distribution, dominant color, and ov
     cardIndex: number,
     imageUrl: string,
   ): Promise<CardDesignOutput> {
-    const subjectPos = composition.subjectPosition || 'right';
     const emptySpace = composition.emptySpace || 'left';
     const dominantColor = composition.dominantColor || '#f5f0e6';
     const mood = composition.mood || 'serene';
-    const lightDir = composition.lightDirection || 'top';
-    const compStyle = composition.compositionStyle || 'portrait';
 
-    // 根据 emptySpace 决定布局
-    const layoutMap: Record<string, 'left-text' | 'right-text' | 'bottom-text' | 'center-text' | 'split' | 'floating'> = {
+    // 根据 emptySpace 决定布局类型
+    const layoutMap: Record<string, string> = {
       left: 'right-text',
       right: 'left-text',
       top: 'bottom-text',
       bottom: 'bottom-text',
-      center: 'center-text',
+      center: 'floating',
       scattered: 'split',
     };
     const layout = layoutMap[emptySpace] || 'right-text';
 
-    const systemPrompt = `You are a senior graphic designer specializing in knowledge card layouts.
+    // 准备知识数据摘要（只传最相关的数据给 AI）
+    const knowledgeSummary = this.buildKnowledgeSummary(knowledge, cardIndex);
 
-Design a beautiful HTML card for an AI-generated illustration. The card should be modern, clean, and visually striking.
+    const systemPrompt = `You are a senior knowledge card designer and editor.
+Your job is to take raw knowledge data and transform it into a beautiful, concise knowledge card.
 
-## Image Analysis
-- Subject is positioned: ${subjectPos}
-- Largest empty space: ${emptySpace}
-- Dominant color: ${dominantColor}
-- Mood: ${mood}
-- Light direction: ${lightDir}
-- Composition: ${compStyle}
+## Your Tasks:
 
-## Card Content
+### 1. Extract & Simplify Key Points
+From the knowledge data, extract 2-3 most important key points.
+Each key point should be:
+- One concise sentence (max 20 characters in Chinese)
+- Easy to understand at a glance
+- The most surprising or interesting fact
+- No jargon or technical terms
+
+### 2. Polish the Title & Subtitle
+- Title: 6-10 characters, punchy and memorable
+- Subtitle: 1-2 sentences that hook the reader
+
+### 3. Polish the Body
+- 1-2 sentences, conversational and engaging
+- Use analogies or comparisons if helpful
+- Never just repeat the title
+
+### 4. Design the Card
+Based on the image composition, create a beautiful HTML card.
+Layout rules based on where the empty space is in the image:
+- empty space LEFT → text on left, image on right
+- empty space RIGHT → image on left, text on right
+- empty space BOTTOM → image on top, text overlay at bottom
+- empty space CENTER → image as full background, floating text card
+
+## Current Card Info:
 - Topic: ${knowledge.englishTopic || knowledge.topic}
-- Stage ${cardIndex + 1}: ${content.title || 'Knowledge Card'}
-- Body: ${content.body || ''}
+- Style preset: ${stylePreset.id} (${stylePreset.name})
+- Mood: ${mood}
+- Dominant color: ${dominantColor}
+- Layout: ${layout}
+
+## Raw Knowledge Data:
+${knowledgeSummary}
+
+## Raw Card Content:
+- Title: ${content.title}
+- Subtitle: ${content.subtitle}
+- Body: ${content.body}
 - Tags: ${(content.tags || []).join(', ')}
-- Footer: ${content.footer || ''}
+- Footer: ${content.footer}
 
-## Design Instructions
-Based on the image analysis, create a complete HTML card using Tailwind CSS.
-
-Layout rules:
-- If empty space is LEFT → put text on left, image on right (layout: right-text)
-- If empty space is RIGHT → put image on left, text on right (layout: left-text)
-- If empty space is BOTTOM → image on top, text at bottom (layout: bottom-text)
-- If empty space is TOP → text on top, image at bottom (layout: top-text)
-- If empty space is CENTER → image as background with floating text overlay (layout: floating)
-- If empty space is SCATTERED → split layout (layout: split)
-
-Color scheme:
-- Extract accent colors from dominantColor
-- Use contrasting text color for readability
-- Ensure good contrast ratio (WCAG AA minimum)
-
-HTML requirements:
-- Use Tailwind CSS classes exclusively
-- Card dimensions: 270px wide × 360px tall (match imageService default)
-- Include: image, title, body, tags, footer
-- Modern typography: sans-serif fonts, good hierarchy
-- Subtle shadows, rounded corners
-- Do NOT include <html>, <head>, or <body> tags — output the card div only
-
-Output JSON:
+## Output Format:
+Return ONLY valid JSON, no markdown, no explanation:
 {
+  "title": "polished 6-10 char title",
+  "subtitle": "polished 1-2 sentence hook",
+  "body": "polished 1-2 sentences, conversational",
+  "keyPoints": ["key point 1", "key point 2", "key point 3"],
+  "html": "<complete HTML card div using Tailwind CSS, 270x360px, no html/head/body tags>",
+  "colors": {
+    "bg": "hex color",
+    "text": "hex color",
+    "accent": "hex color",
+    "secondary": "hex color"
+  },
   "layout": "${layout}",
-  "colors": {"bg": "#...", "text": "#...", "accent": "#...", "secondary": "#..."},
-  "html": "<div class='...'>...</div>",
-  "designDescription": "Brief description of the design choices made"
+  "designDescription": "one sentence explaining the design choice"
 }`;
 
     try {
@@ -215,32 +213,73 @@ Output JSON:
       console.warn('[CardDesignService] Design generation failed:', err);
     }
 
-    // Fallback: 生成基础布局
+    // Fallback
     return this.generateFallbackDesign(content, layout, dominantColor, knowledge, imageUrl);
+  }
+
+  /**
+   * 构建知识数据摘要（根据卡片索引选择最相关的数据）
+   */
+  private buildKnowledgeSummary(knowledge: KnowledgeBase, cardIndex: number): string {
+    const lines: string[] = [];
+
+    if (knowledge.summary) lines.push(`Summary: ${knowledge.summary}`);
+    if (knowledge.category) lines.push(`Category: ${knowledge.category}`);
+
+    // 根据卡片索引选择最相关的结构化数据
+    const facts = knowledge.facts || [];
+    const keyPoints = knowledge.keyPoints || [];
+    const lifecycleStages = knowledge.lifecycleStages || [];
+    const timelineEvents = knowledge.timelineEvents || [];
+    const processSteps = knowledge.processSteps || [];
+
+    if (lifecycleStages.length > 0 && cardIndex < lifecycleStages.length) {
+      const s = lifecycleStages[cardIndex];
+      lines.push(`Life Stage: ${s.name} (${s.period})`);
+      lines.push(`Description: ${s.description || ''}`);
+      lines.push(`Features: ${(s.features || []).join(', ')}`);
+    } else if (timelineEvents.length > 0 && cardIndex < timelineEvents.length) {
+      const e = timelineEvents[cardIndex];
+      lines.push(`Event: ${e.title} (${e.year})`);
+      lines.push(`Description: ${e.description || ''}`);
+      lines.push(`Significance: ${e.significance || ''}`);
+    } else if (processSteps.length > 0 && cardIndex < processSteps.length) {
+      const s = processSteps[cardIndex];
+      lines.push(`Step ${s.order}: ${s.title}`);
+      lines.push(`Description: ${s.description || ''}`);
+      lines.push(`Tip: ${s.tip || ''}`);
+    } else {
+      // 取前 3 个 facts 和 keyPoints
+      const topFacts = facts.slice(0, 3).map((f: { label: string; value: string }) =>
+        `• ${f.label}: ${f.value}`
+      ).join('\n');
+      const topPoints = keyPoints.slice(0, 3).join('\n');
+      if (topFacts) lines.push(`Key Facts:\n${topFacts}`);
+      if (topPoints) lines.push(`Key Points:\n${topPoints}`);
+    }
+
+    // Tags
+    const tags = knowledge.tags || [];
+    if (tags.length > 0) lines.push(`Tags: ${tags.slice(0, 5).join(', ')}`);
+
+    return lines.join('\n') || 'No additional knowledge data available';
   }
 
   /**
    * 调用 Vision API（文本模型 + 图片）
    */
   private async callVisionAPI(systemPrompt: string, userPrompt: string, imageUrl: string): Promise<string> {
-    const visionModel = this.config.imageModel || 'agnes-image-2.1-flash';
-    // 使用文本模型支持 vision（如 gpt-4o, claude-sonnet-4-20250514 等）
-    const model = 'agnes-2.5-flash'; // 支持 vision 的文本模型
-
     const response = await fetch('/ai-api/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model,
+        model: 'agnes-2.5-flash',
         messages: [
           { role: 'system', content: systemPrompt },
           {
             role: 'user',
             content: [
-              {
-                type: 'image_url',
-                image_url: { url: imageUrl },
-              },
+              { type: 'image_url', image_url: { url: imageUrl } },
               { type: 'text', text: userPrompt },
             ],
           },
@@ -250,10 +289,7 @@ Output JSON:
       }),
     });
 
-    if (!response.ok) {
-      throw new Error(`Vision API error: ${response.status}`);
-    }
-
+    if (!response.ok) throw new Error(`Vision API error: ${response.status}`);
     const data = await response.json();
     return data.choices?.[0]?.message?.content || '';
   }
@@ -276,10 +312,7 @@ Output JSON:
       }),
     });
 
-    if (!response.ok) {
-      throw new Error(`Text API error: ${response.status}`);
-    }
-
+    if (!response.ok) throw new Error(`Text API error: ${response.status}`);
     const data = await response.json();
     return data.choices?.[0]?.message?.content || '';
   }
@@ -287,25 +320,22 @@ Output JSON:
   /**
    * 解析设计 JSON（允许 markdown 代码块包裹）
    */
-  private parseDesignJSON(text: string): CardDesignOutput | null {
+  private parseDesignJSON(text: string): CardDesignOutput & {
+    title?: string;
+    subtitle?: string;
+    body?: string;
+    keyPoints?: string[];
+  } | null {
     try {
-      // 尝试直接解析
       const parsed = JSON.parse(text);
-      if (parsed.layout && parsed.colors && parsed.html) {
-        return parsed;
-      }
-    } catch {
-      // 尝试提取 JSON 块
-    }
+      if (parsed.html && parsed.colors) return parsed;
+    } catch { /* ignore */ }
 
-    // 尝试从 markdown 代码块中提取
-    const jsonMatch = text.match(/\{[\s\S]*"layout"[\s\S]*\}/);
-    if (jsonMatch) {
+    const match = text.match(/\{[\s\S]*"html"[\s\S]*\}/);
+    if (match) {
       try {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.layout && parsed.colors && parsed.html) {
-          return parsed;
-        }
+        const parsed = JSON.parse(match[0]);
+        if (parsed.html && parsed.colors) return parsed;
       } catch {}
     }
 
@@ -321,11 +351,7 @@ Output JSON:
     } catch {
       const match = text.match(/\{[\s\S]*\}/);
       if (match) {
-        try {
-          return JSON.parse(match[0]);
-        } catch {
-          return null;
-        }
+        try { return JSON.parse(match[0]); } catch { return null; }
       }
       return null;
     }
@@ -333,7 +359,6 @@ Output JSON:
 
   /**
    * Fallback: 生成基础卡片 HTML
-   * 当 AI 生成失败时使用
    */
   private generateFallbackDesign(
     content: CardContent,
@@ -347,7 +372,6 @@ Output JSON:
     const body = content.body || '';
     const footer = content.footer || '';
 
-    // 根据布局生成不同 HTML
     let html = '';
     if (layout === 'left-text' || layout === 'right-text') {
       const imgSide = layout === 'right-text' ? 'order-2' : 'order-1';
@@ -366,7 +390,6 @@ Output JSON:
           </div>
         </div>`;
     } else {
-      // 默认 bottom-text
       html = `
         <div class="w-[270px] h-[360px] rounded-2xl overflow-hidden shadow-2xl flex flex-col relative">
           <div class="relative w-full h-full">

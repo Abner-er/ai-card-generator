@@ -238,7 +238,7 @@ export interface StylePreset {
 // Part 6: 卡片与项目数据模型
 // ============================================================
 
-/** 卡片设计输出 — 由 vision API 分析图片后决定 */
+/** 卡片设计输出 — AI 提炼知识内容后生成 */
 export interface CardDesignOutput {
   /** 布局类型 */
   layout: 'left-text' | 'right-text' | 'bottom-text' | 'center-text' | 'split' | 'floating';
@@ -253,6 +253,14 @@ export interface CardDesignOutput {
   html: string;
   /** 设计描述（英文，供审校展示） */
   designDescription: string;
+  /** AI 提炼的标题（可选，覆盖原内容） */
+  title?: string;
+  /** AI 提炼的副标题（可选） */
+  subtitle?: string;
+  /** AI 提炼的正文（可选） */
+  body?: string;
+  /** AI 提炼的关键要点（2-3 条，每条一句话） */
+  keyPoints?: string[];
 }
 
 /** 单张卡片的完整数据（贯穿五阶段 + 新增 Stage 4.5） */
@@ -301,7 +309,7 @@ export type WorkflowStage =
   | 'designing-card' | 'review-design'   // Stage 4.5: AI 卡片设计
   | 'typeset' | 'done';
 
-/** 当前激活的阶段编号（1-5） */
+/** 当前激活的阶段编号（1-5，含 4.5） */
 export type StageNumber = 1 | 2 | 3 | 4 | 4.5 | 5;
 
 // ============================================================
