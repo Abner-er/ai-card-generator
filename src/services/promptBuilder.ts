@@ -127,7 +127,6 @@ export class PromptBuilder {
       safetyZone: this.buildSafetyZone(templateId, contentAnalysis),
       decoration: this.buildDecoration(stylePreset, templateId),
       atmosphere: this.buildAtmosphere(templateId, cardIndex, contentAnalysis),
-      negative: this.getNegativePrompt(),
       contentRelation: contentAnalysis,
     };
   }

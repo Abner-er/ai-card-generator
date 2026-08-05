@@ -25,13 +25,12 @@ export class ImageGenerationService {
     onProgress?: (msg: string) => void,
   ): Promise<string> {
     const prompt = PromptBuilder.toPromptString(vp);
-    const negative = vp.negative;
 
     if (import.meta.env.VITE_USE_MOCK === 'true') {
       return this.generateMock(prompt, 1080, 1440);
     }
 
-    return this.generateWithAI(prompt, negative, onProgress);
+    return this.generateWithAI(prompt, onProgress);
   }
 
   /**
@@ -43,14 +42,14 @@ export class ImageGenerationService {
       return this.generateMock(prompt, width, height);
     }
 
-    const { prompt: finalPrompt, negative } = PromptBuilder.rebuildFromEditedContent(
+    const { prompt: finalPrompt } = PromptBuilder.rebuildFromEditedContent(
       promptConfig,
       content,
       { promptTemplate: promptConfig } as any,
       promptConfig.subject,
     );
 
-    return this.generateWithAI(finalPrompt, negative);
+    return this.generateWithAI(finalPrompt);
   }
 
   /**
@@ -146,7 +145,6 @@ export class ImageGenerationService {
    */
   private async generateWithAI(
     prompt: string,
-    negative: string,
     onProgress?: (msg: string) => void,
   ): Promise<string> {
     const maxRetries = 3;
@@ -155,21 +153,15 @@ export class ImageGenerationService {
       try {
         onProgress?.(attempt === 0 ? '正在生成图片...' : `第${attempt + 1}次尝试生成...`);
 
-        const body: Record<string, any> = {
-          model: this.config.imageModel || 'agnes-image-2.1-flash',
-          prompt,
-          n: 1,
-          size: this.config.imageSize || '1024x1024',
-        };
-        // 使用独立 negative_prompt 字段，比拼接在 prompt 文本里效果更好
-        if (negative && negative.trim()) {
-          body.negative_prompt = negative;
-        }
-
         const response = await fetch('/ai-api/images/generations', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          body: JSON.stringify({
+            model: this.config.imageModel || 'agnes-image-2.1-flash',
+            prompt,
+            n: 1,
+            size: this.config.imageSize || '1024x1024',
+          }),
         });
 
         if (response.status === 429) {

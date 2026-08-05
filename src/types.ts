@@ -174,8 +174,8 @@ export interface VisualPrompt {
   decoration: string;
   /** 氛围描述 — 光线、构图角度、情绪（英文，按卡片序号变化） */
   atmosphere?: string;
-  /** 负面提示词 */
-  negative: string;
+  /** 负面提示词（已废弃，大模型对负面提示词不敏感） */
+  negative?: string;
   /** Stage 0: 内容关系判定结果（P0新增） */
   contentRelation?: ContentAnalysis;
   /** P1新增: 信息预算安全区量化约束 */
