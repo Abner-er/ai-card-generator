@@ -282,4 +282,5 @@ ai-card-generator/
 ---
 
 *归档日期：2026-08-05*
-*最后更新：P0-P3 全部实现完成，TypeScript 编译通过*
+*Git Tag：v2.0.0 | Commit：358059a*
+*最后更新：P0-P3 全部实现完成，TypeScript 编译通过，版本已备份*

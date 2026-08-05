@@ -9,9 +9,11 @@ import { KnowledgeService } from './services/knowledgeService';
 import { ContentGenerationService } from './services/contentService';
 import { ImageGenerationService } from './services/imageService';
 import { PromptBuilder } from './services/promptBuilder';
+import { CardDesignService } from './services/cardDesignService';
 import { ExportService } from './services/exportService';
 import type { ExportCardParams } from './services/exportService';
 import { ProjectService } from './services/projectService';
+import { AdaptiveCardRenderer } from './components/AdaptiveCardRenderer';
 import { CardRenderer } from './components/CardRenderer';
 import { RichCardRenderer } from './components/RichCardRenderer';
 import { KnowledgeCardRenderer } from './components/KnowledgeCardRenderer';
@@ -30,14 +32,15 @@ const EMPTY_CONTENT: CardContent = {
   title: '', subtitle: '', body: '', footer: '', tags: [],
 };
 
-// 五阶段定义
-const STAGES: { num: StageNumber; key: string; label: string; icon: string }[] = [
-  { num: 1, key: 'knowledge', label: '知识检索', icon: '🔍' },
-  { num: 2, key: 'content', label: '内容生成', icon: '✍️' },
-  { num: 3, key: 'prompt', label: 'Prompt工程', icon: '🎨' },
-  { num: 4, key: 'image', label: 'AI出图', icon: '🖼️' },
-  { num: 5, key: 'typeset', label: '排版导出', icon: '📐' },
-];
+// 五阶段定义（含 Stage 4.5 AI 卡片设计）
+  const STAGES: { num: StageNumber; key: string; label: string; icon: string }[] = [
+    { num: 1, key: 'knowledge', label: '知识检索', icon: '🔍' },
+    { num: 2, key: 'content', label: '内容生成', icon: '✍️' },
+    { num: 3, key: 'prompt', label: 'Prompt工程', icon: '🎨' },
+    { num: 4, key: 'image', label: 'AI出图', icon: '🖼️' },
+    { num: 4.5 as any, key: 'design', label: 'AI卡片设计', icon: '✨' },
+    { num: 5, key: 'typeset', label: '排版导出', icon: '📐' },
+  ];
 
 const App: React.FC = () => {
   // ===== 工作流状态 =====
@@ -61,6 +64,7 @@ const App: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState('');
   const [previewScale, setPreviewScale] = useState(0.35);
   const [imageProgress, setImageProgress] = useState({ current: 0, total: 0, msg: '' });
+  const [designProgress, setDesignProgress] = useState({ current: 0, total: 0, msg: '' });
 
   // Refs
   const cardRef = useRef<HTMLDivElement>(null);
@@ -68,6 +72,7 @@ const App: React.FC = () => {
   const knowledgeServiceRef = useRef(new KnowledgeService(DEFAULT_AI_CONFIG));
   const contentServiceRef = useRef(new ContentGenerationService(DEFAULT_AI_CONFIG));
   const imageServiceRef = useRef(new ImageGenerationService(DEFAULT_AI_CONFIG));
+  const cardDesignServiceRef = useRef(new CardDesignService(DEFAULT_AI_CONFIG));
 
   // 自动计算缩放
   useEffect(() => {
@@ -89,6 +94,7 @@ const App: React.FC = () => {
       baseURL: aiConfig.baseURL,
       textModel: aiConfig.textModel,
     });
+    cardDesignServiceRef.current.updateConfig(aiConfig);
   }, [aiConfig.baseURL, aiConfig.textModel]);
 
   // ===== 当前阶段编号 =====
@@ -99,6 +105,7 @@ const App: React.FC = () => {
       'generating-content': 2, 'review-content': 2,
       'generating-prompt': 3, 'review-prompt': 3,
       'generating-image': 4, 'review-image': 4,
+      'designing-card': 4.5, 'review-design': 4.5,
       'typeset': 5, 'done': 5,
     };
     return map[stage] ?? 0;
@@ -298,6 +305,89 @@ const App: React.FC = () => {
       setStatus('');
     }
   }, [cards, aiConfig]);
+
+  // ============================================================
+  // Stage 5: AI 卡片设计（Stage 4.5 — Vision API 分析图片后设计）
+  // 核心：每张卡片基于图片构图自动生成唯一布局、配色、层次
+  // ============================================================
+  const handleDesignCards = useCallback(async () => {
+    if (cards.length === 0) return;
+    setStage('designing-card');
+    setStatus('AI 正在分析每张图片构图并设计卡片布局...');
+    setErrorMsg('');
+    setDesignProgress({ current: 0, total: cards.length, msg: '开始设计...' });
+
+    try {
+      cardDesignServiceRef.current.updateConfig(aiConfig);
+      const updatedCards = [...cards];
+      const total = cards.length;
+
+      for (let i = 0; i < total; i++) {
+        const card = updatedCards[i];
+        if (!card.imageUrl || card.imageStatus !== 'done') {
+          updatedCards[i] = { ...card, designStatus: 'error', designError: '图片未就绪' };
+          setCards([...updatedCards]);
+          continue;
+        }
+
+        setDesignProgress({ current: i + 1, total, msg: `正在设计第${i + 1}/${total}张卡片...` });
+        setStatus(`正在设计第${i + 1}/${total}张卡片...`);
+
+        try {
+          const design = await cardDesignServiceRef.current.designCard(
+            card.imageUrl,
+            card.knowledge!,
+            card.content!,
+            selectedStylePreset,
+            i,
+            total,
+            (s, sn) => { /* 进度由 designProgress 管理 */ },
+          );
+          updatedCards[i] = { ...card, design, designStatus: 'done', designError: undefined };
+        } catch (err) {
+          console.warn(`[App] Card ${i + 1} design failed:`, err);
+          updatedCards[i] = { ...card, designStatus: 'error', designError: err instanceof Error ? err.message : '设计失败' };
+        }
+        setCards([...updatedCards]);
+      }
+
+      setStage('review-design');
+      setStatus(`卡片设计完成（${total}张），请审校每张卡片的 AI 设计`);
+      setDesignProgress({ current: 0, total: 0, msg: '' });
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : '卡片设计失败');
+      setStage('review-image');
+      setStatus('');
+      setDesignProgress({ current: 0, total: 0, msg: '' });
+    }
+  }, [cards, aiConfig, selectedStylePreset]);
+
+  // ===== 单张重新设计 =====
+  const handleRegenerateDesign = useCallback(async (cardIndex: number) => {
+    const card = cards[cardIndex];
+    if (!card?.imageUrl) return;
+    setStatus(`正在重新设计第${cardIndex + 1}张卡片...`);
+    setErrorMsg('');
+    try {
+      cardDesignServiceRef.current.updateConfig(aiConfig);
+      const design = await cardDesignServiceRef.current.designCard(
+        card.imageUrl,
+        card.knowledge!,
+        card.content!,
+        selectedStylePreset,
+        cardIndex,
+        cards.length,
+        () => {},
+      );
+      const updatedCards = [...cards];
+      updatedCards[cardIndex] = { ...card, design, designStatus: 'done', designError: undefined };
+      setCards(updatedCards);
+      setStatus('卡片设计重新完成');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : '卡片设计失败');
+      setStatus('');
+    }
+  }, [cards, aiConfig, selectedStylePreset]);
 
   // ============================================================
   // Stage 5: 导出PNG
@@ -508,10 +598,14 @@ const App: React.FC = () => {
 
   // ===== 渲染卡片 =====
   const renderCard = () => {
+    if (activeCard && activeCard.design && activeCard.designStatus === 'done') {
+      // AI 设计已就绪：使用自适应渲染器
+      return <AdaptiveCardRenderer card={activeCard} stylePreset={selectedStylePreset} cardIndex={activeCardIndex} cardTotal={cards.length} width={selectedTemplate.canvas.width} height={selectedTemplate.canvas.height} />;
+    }
+    // Fallback: 旧版渲染器（图片未设计时）
     const content = activeContent;
     const imageUrl = activeImageUrl;
     const tpl = selectedTemplate;
-
     if (tpl.renderer === 'knowledge' || tpl.renderer === 'lifecycle' || tpl.renderer === 'timeline' || tpl.renderer === 'process') {
       return <KnowledgeCardRenderer template={tpl} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} stylePreset={selectedStylePreset} cardIndex={activeCardIndex} />;
     }
@@ -979,29 +1073,76 @@ const App: React.FC = () => {
           )}
 
           {/* ===== Stage 4: 图片审校 ===== */}
-          {(stage === 'review-image' || stage === 'typeset') && activeCard && (
+          {(stage === 'review-image' || stage === 'designing-card' || stage === 'review-design') && activeCard && (
             <section>
               <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-gray-700">阶段4：图片审校</h2>
+                <h2 className="text-sm font-semibold text-gray-700">
+                  {stage === 'review-image' ? '阶段4：图片审校' : stage === 'designing-card' ? '阶段4.5：AI卡片设计' : '阶段4.5：审校设计'}
+                </h2>
                 <button onClick={() => setStage('review-prompt')} className="text-xs text-gray-400 hover:text-gray-600">← Prompt</button>
               </div>
 
               <CardSelector />
 
-              <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded-lg">
-                <p className="text-sm text-green-700 font-medium">✓ 图片已生成</p>
-                {isSeries && <p className="text-xs text-green-600 mt-1">共{cards.length}张，当前第{activeCardIndex + 1}张</p>}
-              </div>
+              {/* 图片生成状态 */}
+              {stage === 'review-image' && (
+                <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded-lg">
+                  <p className="text-sm text-green-700 font-medium">✓ 图片已生成</p>
+                  {isSeries && <p className="text-xs text-green-600 mt-1">共{cards.length}张，当前第{activeCardIndex + 1}张</p>}
+                </div>
+              )}
 
+              {/* 设计进度 */}
+              {(stage === 'designing-card' || stage === 'review-design') && (
+                <div className="mb-3 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+                  <p className="text-sm text-purple-700 font-medium">
+                    {designProgress.total > 0
+                      ? `✨ 正在设计 (${designProgress.current}/${designProgress.total})`
+                      : '✨ AI 卡片设计完成'}
+                  </p>
+                  {designProgress.msg && <p className="text-xs text-purple-500 mt-1">{designProgress.msg}</p>}
+                  {designProgress.total > 0 && stage === 'designing-card' && (
+                    <div className="mt-2">
+                      <div className="w-full bg-purple-200 rounded-full h-1.5">
+                        <div className="bg-purple-500 h-1.5 rounded-full transition-all"
+                          style={{ width: `${(designProgress.current / designProgress.total) * 100}%` }} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 操作按钮 */}
               <button onClick={() => handleRegenerateImage(activeCardIndex)}
                 className="w-full py-2 mb-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition">
                 🔄 重新生成此张图片
               </button>
 
-              <button onClick={() => setStage('typeset')}
-                className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition flex items-center justify-center gap-2">
-                <span>📐</span> 进入排版导出
-              </button>
+              {stage === 'review-image' && (
+                <button onClick={handleDesignCards} disabled={cards.some(c => c.imageStatus !== 'done')}
+                  className="w-full py-2.5 mb-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg font-medium text-sm hover:from-purple-600 hover:to-pink-600 transition disabled:opacity-50 flex items-center justify-center gap-2">
+                  <span>✨</span> AI卡片设计（每张卡独一无二）
+                </button>
+              )}
+
+              {stage === 'review-design' && (
+                <>
+                  <button onClick={() => handleRegenerateDesign(activeCardIndex)}
+                    className="w-full py-2 mb-2 border border-purple-300 rounded-lg text-sm text-purple-700 hover:bg-purple-50 transition">
+                    🔄 重新设计此张卡片
+                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button onClick={() => setStage('review-image')}
+                      className="py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition">
+                      ← 返回图片
+                    </button>
+                    <button onClick={() => setStage('typeset')}
+                      className="py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition flex items-center justify-center gap-2">
+                      <span>📐</span> 进入排版导出
+                    </button>
+                  </div>
+                </>
+              )}
             </section>
           )}
 

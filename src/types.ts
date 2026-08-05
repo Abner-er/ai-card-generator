@@ -238,7 +238,24 @@ export interface StylePreset {
 // Part 6: 卡片与项目数据模型
 // ============================================================
 
-/** 单张卡片的完整数据（贯穿五阶段） */
+/** 卡片设计输出 — 由 vision API 分析图片后决定 */
+export interface CardDesignOutput {
+  /** 布局类型 */
+  layout: 'left-text' | 'right-text' | 'bottom-text' | 'center-text' | 'split' | 'floating';
+  /** 颜色方案 */
+  colors: {
+    bg: string;
+    text: string;
+    accent: string;
+    secondary: string;
+  };
+  /** 完整的 HTML 卡片内容（含 Tailwind 样式） */
+  html: string;
+  /** 设计描述（英文，供审校展示） */
+  designDescription: string;
+}
+
+/** 单张卡片的完整数据（贯穿五阶段 + 新增 Stage 4.5） */
 export interface CardData {
   id: number;
   /** 阶段标题，如"01 新生期" */
@@ -253,6 +270,10 @@ export interface CardData {
   imageUrl?: string;            // Stage 4
   imageStatus?: 'pending' | 'generating' | 'done' | 'error';
   imageError?: string;
+  /** Stage 4.5: AI 卡片设计（vision API 分析图片后输出） */
+  design?: CardDesignOutput;
+  designStatus?: 'pending' | 'generating' | 'done' | 'error';
+  designError?: string;
 }
 
 /** 项目 — 一个主题下多张卡片的集合 */
@@ -270,22 +291,18 @@ export interface CardProject {
 // Part 7: 工作流与状态
 // ============================================================
 
-/** 五阶段工作流步骤 */
+/** 工作流阶段 */
 export type WorkflowStage =
-  | 'input'              // 输入主题
-  | 'generating-knowledge' // Stage 1 执行中
-  | 'review-knowledge'  // Stage 1 审校
-  | 'generating-content' // Stage 2 执行中
-  | 'review-content'    // Stage 2 审校
-  | 'generating-prompt' // Stage 3 执行中
-  | 'review-prompt'     // Stage 3 审校
-  | 'generating-image'  // Stage 4 执行中
-  | 'review-image'      // Stage 4 审校
-  | 'typeset'           // Stage 5 排版导出
-  | 'done';
+  | 'input'
+  | 'generating-knowledge' | 'review-knowledge'
+  | 'generating-content' | 'review-content'
+  | 'generating-prompt' | 'review-prompt'
+  | 'generating-image' | 'review-image'
+  | 'designing-card' | 'review-design'   // Stage 4.5: AI 卡片设计
+  | 'typeset' | 'done';
 
 /** 当前激活的阶段编号（1-5） */
-export type StageNumber = 1 | 2 | 3 | 4 | 5;
+export type StageNumber = 1 | 2 | 3 | 4 | 4.5 | 5;
 
 // ============================================================
 // Part 8: AI 服务配置
