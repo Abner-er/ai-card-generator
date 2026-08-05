@@ -149,24 +149,27 @@ export class ImageGenerationService {
     negative: string,
     onProgress?: (msg: string) => void,
   ): Promise<string> {
-    const fullPrompt = negative ? `${prompt}. Avoid: ${negative}` : prompt;
     const maxRetries = 3;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         onProgress?.(attempt === 0 ? '正在生成图片...' : `第${attempt + 1}次尝试生成...`);
 
+        const body: Record<string, any> = {
+          model: this.config.imageModel || 'agnes-image-2.1-flash',
+          prompt,
+          n: 1,
+          size: this.config.imageSize || '1024x1024',
+        };
+        // 使用独立 negative_prompt 字段，比拼接在 prompt 文本里效果更好
+        if (negative && negative.trim()) {
+          body.negative_prompt = negative;
+        }
+
         const response = await fetch('/ai-api/images/generations', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: this.config.imageModel || 'agnes-image-2.1-flash',
-            prompt: fullPrompt,
-            n: 1,
-            size: this.config.imageSize || '1024x1024',
-          }),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
         });
 
         if (response.status === 429) {
