@@ -9,7 +9,7 @@
  * 所有 blocks 通过 getSettings() 同步读取，改完立即生效，无需重启。
  */
 
-import type { PageBadgeFormat, PageBadgePos } from './styleEngine';
+import { STYLE_PRESETS, type PageBadgeFormat, type PageBadgePos } from './styleEngine';
 
 export interface TextSettings {
   model: string;
@@ -410,6 +410,133 @@ export async function resetSettings(): Promise<SaveResult> {
   try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ }
   emit();
   return { ok: true };
+}
+
+/* ---------------- 配置导出 / 导入 ---------------- */
+
+/** 配置文件格式版本：结构变更时递增，导入端据此做兼容 */
+export const CONFIG_BUNDLE_VERSION = 1;
+
+export interface ConfigBundle {
+  /** 标识文件来源，导入时用来拒绝无关的 JSON */
+  app: 'ai-card-generator';
+  version: number;
+  exportedAt: string;
+  /** 导出时的运行模式，仅作参考 */
+  mode: SettingsMode;
+  /** 文件里是否含明文 Key */
+  hasKeys: boolean;
+  settings: ReturnType<typeof persistable>;
+  proxy: ProxySettings;
+  keys?: LocalKeys;
+}
+
+const PAGE_POS_VALUES: PageBadgePos[] = ['tl', 'tc', 'tr', 'bl', 'bc', 'br'];
+const PAGE_FMT_VALUES: PageBadgeFormat[] = ['cn', 'slash', 'dot'];
+const PROXY_FIELDS: Array<keyof ProxySettings> = ['textBaseUrl', 'dashBaseUrl', 'checkBaseUrl', 'sensenovaBaseUrl'];
+const KEY_FIELDS: Array<keyof LocalKeys> = ['agnes', 'dashscope', 'check', 'sensenova'];
+
+/** 导出当前配置。server 模式的 Key 在服务端，前端拿不到明文，故不含 keys */
+export function exportConfig(): ConfigBundle {
+  const includeKeys = currentMode !== 'server';
+  return {
+    app: 'ai-card-generator',
+    version: CONFIG_BUNDLE_VERSION,
+    exportedAt: new Date().toISOString(),
+    mode: currentMode,
+    hasKeys: includeKeys && KEY_FIELDS.some((k) => !!localKeys[k]),
+    settings: persistable(current),
+    proxy: { ...currentProxy },
+    ...(includeKeys ? { keys: { ...localKeys } } : {}),
+  };
+}
+
+/**
+ * 只保留已知字段与合法取值。导入是系统边界（内容来自用户挑选的文件，可能被手改过），
+ * 脏值若直接合并进去会污染运行时状态，所以这里逐字段白名单过滤。
+ */
+function sanitizeSettings(input: any): Partial<AppSettings> {
+  const out: any = {};
+  for (const k of ['mock', 'app', 'ui', 'text', 'image', 'study', 'quiz'] as const) {
+    const v = input?.[k];
+    if (v === undefined) continue;
+    const base: any = (ENV_DEFAULTS as any)[k];
+    if (typeof base !== 'object') {
+      if (typeof v === typeof base) out[k] = v;
+      continue;
+    }
+    const sub: any = {};
+    for (const sk of Object.keys(base)) {
+      const sv = v?.[sk];
+      if (sv !== undefined && typeof sv === typeof base[sk]) sub[sk] = sv;
+    }
+    if (Object.keys(sub).length) out[k] = sub;
+  }
+  // 类型对上但取值非法的枚举字段，单独剔除（否则会静默回退成默认预设）
+  const { ui, image, quiz } = out;
+  if (ui) {
+    if (ui.stylePresetId !== undefined && ui.stylePresetId !== 'auto' && !STYLE_PRESETS.some((p) => p.id === ui.stylePresetId)) delete ui.stylePresetId;
+    if (ui.pagePos !== undefined && !PAGE_POS_VALUES.includes(ui.pagePos)) delete ui.pagePos;
+    if (ui.pageFormat !== undefined && !PAGE_FMT_VALUES.includes(ui.pageFormat)) delete ui.pageFormat;
+  }
+  if (image?.providerId !== undefined && image.providerId !== 'qwen' && image.providerId !== 'sensenova') delete image.providerId;
+  if (quiz?.defaultDifficulty !== undefined && !['easy', 'medium', 'hard'].includes(quiz.defaultDifficulty)) delete quiz.defaultDifficulty;
+  return out;
+}
+
+export interface ImportResult {
+  ok: boolean;
+  error?: string;
+  /** 成功写入了文件里的 Key */
+  appliedKeys?: boolean;
+}
+
+/**
+ * 应用导入的配置：设置 → 端点 → Key 依次写入，任一环节失败即中断并回报原因。
+ * server 模式下同样可导入 Key（会写进服务端 settings.json）。
+ */
+export async function importConfig(raw: unknown): Promise<ImportResult> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, error: '文件内容不是有效的配置对象' };
+  }
+  const b = raw as Partial<ConfigBundle>;
+  if (!b.settings || typeof b.settings !== 'object' || Array.isArray(b.settings)) {
+    return { ok: false, error: '缺少 settings 字段，可能不是本应用导出的配置文件' };
+  }
+
+  const settings = sanitizeSettings(b.settings);
+  if (!Object.keys(settings).length) {
+    return { ok: false, error: '配置文件里的设置项都无法识别' };
+  }
+
+  let res = await saveRuntimeSettings(settings);
+  if (!res.ok) return { ok: false, error: res.error };
+
+  if (b.proxy && typeof b.proxy === 'object') {
+    const proxy: Partial<ProxySettings> = {};
+    for (const k of PROXY_FIELDS) {
+      const v = (b.proxy as any)[k];
+      if (typeof v === 'string') proxy[k] = v;
+    }
+    if (Object.keys(proxy).length) {
+      res = await saveProxy(proxy);
+      if (!res.ok) return { ok: false, error: res.error };
+    }
+  }
+
+  if (b.keys && typeof b.keys === 'object') {
+    const payload: Partial<LocalKeys> = {};
+    for (const k of KEY_FIELDS) {
+      const v = (b.keys as any)[k];
+      if (typeof v === 'string' && v.trim()) payload[k] = v.trim();
+    }
+    if (Object.keys(payload).length) {
+      res = await saveKeys(payload);
+      if (!res.ok) return { ok: false, error: res.error };
+      return { ok: true, appliedKeys: true };
+    }
+  }
+  return { ok: true, appliedKeys: false };
 }
 
 export interface TestResult {

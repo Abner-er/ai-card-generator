@@ -7,10 +7,11 @@
  * API Key 仅存本浏览器 localStorage，直连各家 API（网关见 blocks/gateway.ts），
  * 绝不进代码仓库或任何服务器。
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   getSettings, getMode, getProxy, getKeysView, subscribe,
   saveRuntimeSettings, saveKeys, saveProxy, resetSettings,
+  exportConfig, importConfig,
   testTextModel, testImageModel, testCheckModel,
   DEFAULT_APP_NAME, DEFAULT_APP_SUBTITLE,
   type TestResult,
@@ -226,6 +227,48 @@ export default function AdminView({ onBack, onToast }: Props) {
     } else {
       onToast('重置失败：' + res.error);
     }
+  };
+
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const handleExport = () => {
+    const bundle = exportConfig();
+    if (bundle.hasKeys && !window.confirm('导出的配置文件包含明文 API Key。\n请只保存在可信位置，不要上传到网盘、聊天工具或代码仓库。\n\n继续导出？')) return;
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const d = new Date();
+    const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `prompt-workshop-config-${stamp}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    onToast(bundle.hasKeys ? '配置已导出（含 API Key）' : '配置已导出（不含 API Key）');
+  };
+
+  const handleImportFile = async (file: File) => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await file.text());
+    } catch {
+      onToast('导入失败：文件不是合法 JSON');
+      return;
+    }
+    const incoming = parsed as { keys?: unknown } | null;
+    const withKeys = !!incoming?.keys && typeof incoming.keys === 'object'
+      && Object.values(incoming.keys as Record<string, unknown>).some((v) => typeof v === 'string' && v.trim());
+    const msg = withKeys
+      ? '导入将覆盖当前全部设置，并写入文件中的 API Key。\n\n继续？'
+      : '导入将覆盖当前全部设置（文件不含 API Key）。\n\n继续？';
+    if (!window.confirm(msg)) return;
+    const res = await importConfig(parsed);
+    if (!res.ok) {
+      onToast('导入失败：' + res.error);
+      return;
+    }
+    setDraft(draftFromSettings());
+    setTextTest(null); setImgTest(null); setCheckTest(null);
+    onToast(res.appliedKeys ? '配置已导入（含 API Key）' : '配置已导入');
   };
 
   const runTextTest = async () => {
@@ -555,6 +598,34 @@ export default function AdminView({ onBack, onToast }: Props) {
         </div>
       </section>
 
+      {/* ============ 配置迁移 ============ */}
+      <section style={S.section}>
+        <div style={S.secHead}>
+          <h3 style={S.secTitle}>📦 配置迁移</h3>
+          <span style={S.secHint}>换浏览器或换设备时搬运设置</span>
+        </div>
+        <div style={S.migrateRow}>
+          <button style={S.ghostBtn} onClick={handleExport}>⬇ 导出配置</button>
+          <button style={S.ghostBtn} onClick={() => fileRef.current?.click()}>⬆ 导入配置</button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="application/json,.json"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = '';
+              if (f) void handleImportFile(f);
+            }}
+          />
+        </div>
+        <p style={S.migrateHint}>
+          {isServer
+            ? '服务端模式下 API Key 只存在本机 settings.json，导出文件不含 Key，导入后需重新填写。'
+            : '导出文件包含明文 API Key，请妥善保管：不要上传到网盘、聊天工具或代码仓库。导入会覆盖当前全部设置。'}
+        </p>
+      </section>
+
       {/* ============ 操作栏 ============ */}
       <div style={S.actions}>
         <button style={S.ghostBtn} onClick={handleReset}>恢复默认</button>
@@ -630,6 +701,8 @@ const S: Record<string, React.CSSProperties> = {
     background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.25)', color: 'var(--text-secondary)',
   },
   code: { fontFamily: 'JetBrains Mono, monospace', fontSize: 12, background: 'var(--surface-3)', padding: '1px 6px', borderRadius: 6 },
+  migrateRow: { display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 10 },
+  migrateHint: { fontSize: 12.5, color: 'var(--text-muted)', lineHeight: 1.7 },
 
   section: {
     background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16,
