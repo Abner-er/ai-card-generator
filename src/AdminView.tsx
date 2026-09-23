@@ -12,8 +12,12 @@ import {
   getSettings, getMode, getProxy, getKeysView, subscribe,
   saveRuntimeSettings, saveKeys, saveProxy, resetSettings,
   testTextModel, testImageModel, testCheckModel,
+  DEFAULT_APP_NAME, DEFAULT_APP_SUBTITLE,
   type TestResult,
 } from './blocks/settings';
+import {
+  STYLE_PRESETS, type PageBadgeFormat, type PageBadgePos,
+} from './blocks/styleEngine';
 
 interface Props {
   onBack: () => void;
@@ -23,6 +27,12 @@ interface Props {
 /** 数值草稿（字符串承载，允许自由输入，保存时解析钳制） */
 interface Draft {
   mock: boolean;
+  appName: string;
+  appSubtitle: string;
+  uiStylePresetId: string;
+  uiPageNumber: boolean;
+  uiPagePos: PageBadgePos;
+  uiPageFormat: PageBadgeFormat;
   textModel: string;
   checkModel: string;
   extractModel: string;
@@ -49,7 +59,15 @@ interface Draft {
   keySen: string;
 }
 
-/** 各服务商的默认模型名（切换服务商时联动填充） */
+/** 页码角标可选位置 / 格式（与输入步骤的「输出选项」保持一致） */
+const PAGE_POS_LABEL: Record<PageBadgePos, string> = {
+  tl: '左上角', tc: '上边缘正中', tr: '右上角', bl: '左下角', bc: '下边缘正中', br: '右下角',
+};
+const PAGE_FMT_LABEL: Record<PageBadgeFormat, string> = {
+  cn: '第 X / N 页', slash: 'X / N', dot: 'X · N',
+};
+
+/** 各服务商的默认模型名（切换服务商时联动填充目标默认） */
 const DEFAULT_IMAGE_MODEL: Record<'qwen' | 'sensenova', string> = {
   qwen: 'qwen-image-3.0',
   sensenova: 'sensenova-u1.5-lite',
@@ -59,6 +77,12 @@ function draftFromSettings(): Draft {
   const s = getSettings();
   return {
     mock: s.mock,
+    appName: s.app.name,
+    appSubtitle: s.app.subtitle,
+    uiStylePresetId: s.ui.stylePresetId,
+    uiPageNumber: s.ui.pageNumber,
+    uiPagePos: s.ui.pagePos,
+    uiPageFormat: s.ui.pageFormat,
     textModel: s.text.model,
     checkModel: s.text.checkModel,
     extractModel: s.text.extractModel,
@@ -129,6 +153,16 @@ export default function AdminView({ onBack, onToast }: Props) {
 
     const patch = {
       mock: draft.mock,
+      app: {
+        name: draft.appName.trim() || DEFAULT_APP_NAME,
+        subtitle: draft.appSubtitle.trim(),
+      },
+      ui: {
+        stylePresetId: draft.uiStylePresetId,
+        pageNumber: draft.uiPageNumber,
+        pagePos: draft.uiPagePos,
+        pageFormat: draft.uiPageFormat,
+      },
       text: {
         model: draft.textModel.trim() || 'agnes-2.5-flash',
         checkModel: draft.checkModel.trim(),
@@ -232,6 +266,74 @@ export default function AdminView({ onBack, onToast }: Props) {
           不经过任何服务器；清除浏览器数据会丢失 Key，需重新填写。开发时可用 <code style={S.code}>npm run dev</code> 切回服务端模式。
         </div>
       )}
+
+      {/* ============ 应用与默认输出 ============ */}
+      <section style={S.section}>
+        <div style={S.secHead}>
+          <h3 style={S.secTitle}>🏷 应用与默认输出</h3>
+          <span style={S.secHint}>名称即时生效；风格与页码是每次生成的默认值</span>
+        </div>
+        <div style={S.grid}>
+          <Field label="应用名称" hint="导航栏标题与浏览器标签页">
+            <input
+              style={S.input}
+              value={draft.appName}
+              maxLength={24}
+              onChange={(e) => set('appName', e.target.value)}
+              placeholder={DEFAULT_APP_NAME}
+            />
+          </Field>
+          <Field label="副标题" hint="名称下方小字，留空则不显示">
+            <input
+              style={S.input}
+              value={draft.appSubtitle}
+              maxLength={48}
+              onChange={(e) => set('appSubtitle', e.target.value)}
+              placeholder={DEFAULT_APP_SUBTITLE}
+            />
+          </Field>
+          <Field label="默认视觉风格" hint="选「跟随 AI 推荐」时由模型按输入内容判断">
+            <select style={S.select} value={draft.uiStylePresetId} onChange={(e) => set('uiStylePresetId', e.target.value)}>
+              <option value="auto">✨ 跟随 AI 推荐</option>
+              {STYLE_PRESETS.map((p) => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="默认页码角标" hint="在卡片图上标注页码">
+            <Toggle
+              on={draft.uiPageNumber}
+              onChange={(v) => set('uiPageNumber', v)}
+              label={draft.uiPageNumber ? '显示页码' : '不显示页码'}
+            />
+          </Field>
+          <Field label="页码位置">
+            <select
+              style={{ ...S.select, ...(draft.uiPageNumber ? {} : S.fieldOff) }}
+              value={draft.uiPagePos}
+              disabled={!draft.uiPageNumber}
+              onChange={(e) => set('uiPagePos', e.target.value as PageBadgePos)}
+            >
+              {(Object.keys(PAGE_POS_LABEL) as PageBadgePos[]).map((k) => (
+                <option key={k} value={k}>{PAGE_POS_LABEL[k]}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="页码格式">
+            <select
+              style={{ ...S.select, ...(draft.uiPageNumber ? {} : S.fieldOff) }}
+              value={draft.uiPageFormat}
+              disabled={!draft.uiPageNumber}
+              onChange={(e) => set('uiPageFormat', e.target.value as PageBadgeFormat)}
+            >
+              {(Object.keys(PAGE_FMT_LABEL) as PageBadgeFormat[]).map((k) => (
+                <option key={k} value={k}>{PAGE_FMT_LABEL[k]}</option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        <p style={S.gridHint}>保存后立即生效：页码设置的改动会同步重建已生成的提示词；视觉风格作用于之后新生成的内容。</p>
+      </section>
 
       {/* ============ 文本模型 ============ */}
       <section style={S.section}>
@@ -559,6 +661,13 @@ const S: Record<string, React.CSSProperties> = {
     fontFamily: 'inherit',
   },
   keyRow: { display: 'flex', gap: 8, alignItems: 'center' },
+  select: {
+    padding: '9px 12px', borderRadius: 10, border: '1px solid var(--border-2)',
+    background: 'var(--surface-3)', color: 'var(--text)', fontSize: 13, outline: 'none', width: '100%',
+    fontFamily: 'inherit', cursor: 'pointer',
+  },
+  fieldOff: { opacity: 0.45, cursor: 'not-allowed' },
+  gridHint: { fontSize: 11.5, color: 'var(--text-faint)', marginTop: 14, lineHeight: 1.6 },
   miniDanger: {
     padding: '8px 10px', borderRadius: 8, border: '1px solid rgba(248,113,113,0.35)',
     background: 'transparent', color: 'var(--error)', fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap',

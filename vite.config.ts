@@ -23,6 +23,8 @@ const PLACEHOLDER_OK = (v: unknown) =>
 
 interface GatewayConfig {
   mock: boolean;
+  app: { name: string; subtitle: string };
+  ui: { stylePresetId: string; pageNumber: boolean; pagePos: string; pageFormat: string };
   text: {
     model: string;
     checkModel: string;
@@ -255,6 +257,11 @@ function aiGatewayPlugin(): Plugin {
 
       const defaults: GatewayConfig = {
         mock: env.VITE_USE_MOCK === 'true',
+        app: {
+          name: env.VITE_APP_NAME || '提示词工坊',
+          subtitle: env.VITE_APP_SUBTITLE || 'Knowledge Card Prompt Workshop',
+        },
+        ui: { stylePresetId: 'auto', pageNumber: false, pagePos: 'tr', pageFormat: 'cn' },
         text: {
           model: env.VITE_TEXT_MODEL || 'agnes-2.5-flash',
           checkModel: env.VITE_CHECK_MODEL || '',

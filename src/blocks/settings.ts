@@ -9,6 +9,8 @@
  * 所有 blocks 通过 getSettings() 同步读取，改完立即生效，无需重启。
  */
 
+import type { PageBadgeFormat, PageBadgePos } from './styleEngine';
+
 export interface TextSettings {
   model: string;
   /** 质检模型（B 模型）：留空 = 回退到 model。用不同家族的模型可规避自我偏好偏差 */
@@ -49,8 +51,27 @@ export interface KeyStatus {
   masked: string;
 }
 
+/** 应用外观标识（可改：导航栏标题、浏览器标签页标题） */
+export interface AppIdentity {
+  name: string;
+  subtitle: string;
+}
+
+/**
+ * 默认生成参数：进入输入步骤时的初始值。
+ * stylePresetId 支持哨兵值 'auto' = 跟随 AI 按输入内容推荐风格。
+ */
+export interface UiSettings {
+  stylePresetId: string;
+  pageNumber: boolean;
+  pagePos: PageBadgePos;
+  pageFormat: PageBadgeFormat;
+}
+
 export interface AppSettings {
   mock: boolean;
+  app: AppIdentity;
+  ui: UiSettings;
   text: TextSettings;
   image: ImageSettings;
   study: StudySettings;
@@ -64,9 +85,19 @@ export interface AppSettings {
 
 export type SettingsMode = 'server' | 'local';
 
+/** 应用名默认值（设置页可改；导航栏与浏览器标题都读这里） */
+export const DEFAULT_APP_NAME = '提示词工坊';
+export const DEFAULT_APP_SUBTITLE = 'Knowledge Card Prompt Workshop';
+
 /** 编译期默认值（.env → 构建常量），作为兜底 */
 const ENV_DEFAULTS: AppSettings = {
   mock: import.meta.env.VITE_USE_MOCK === 'true',
+  app: {
+    name: import.meta.env.VITE_APP_NAME ?? DEFAULT_APP_NAME,
+    subtitle: import.meta.env.VITE_APP_SUBTITLE ?? DEFAULT_APP_SUBTITLE,
+  },
+  // 默认让 AI 按内容选风格：固定一种风格（如"专业医学插画"）套所有主题并不合适
+  ui: { stylePresetId: 'auto', pageNumber: false, pagePos: 'tr', pageFormat: 'cn' },
   text: {
     model: import.meta.env.VITE_TEXT_MODEL ?? 'agnes-2.5-flash',
     checkModel: import.meta.env.VITE_CHECK_MODEL ?? '',
@@ -194,7 +225,10 @@ export function subscribe(fn: () => void): () => void {
 
 /** 可持久化到 localStorage 的子集（不含 server/keys） */
 function persistable(s: AppSettings) {
-  return { mock: s.mock, text: s.text, image: s.image, study: s.study, quiz: s.quiz };
+  return {
+    mock: s.mock, app: s.app, ui: s.ui,
+    text: s.text, image: s.image, study: s.study, quiz: s.quiz,
+  };
 }
 
 function loadFromLocalStorage(): Partial<AppSettings> {
@@ -262,7 +296,7 @@ export interface SaveResult {
 }
 
 /**
- * 保存设置。patch 只包含 UI 可编辑字段（mock/text/image/study/quiz）。
+ * 保存设置。patch 只包含 UI 可编辑字段（mock/app/ui/text/image/study/quiz）。
  * server 模式走 API；local 模式写 localStorage。
  */
 export async function saveRuntimeSettings(patch: Partial<AppSettings>): Promise<SaveResult> {

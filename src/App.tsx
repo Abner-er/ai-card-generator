@@ -17,7 +17,7 @@
  * 新增：间隔重复学习系统（SM-2 算法）
  * 新增：多格式输入（PDF/Markdown/网页）
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CardPage, DecomposedModule, DecomposeResult, KnowledgeModule, ModuleStyle } from './blocks/types';
 import { STYLE_PRESETS, getPreset, buildPagePrompt, buildAnchorPrompt, REFERENCE_WORKFLOW, recommendStyle } from './blocks/styleEngine';
 import type { PageBadgePos, PageBadgeFormat } from './blocks/styleEngine';
@@ -47,6 +47,18 @@ import { getImageProvider } from './blocks/imageProvider';
 type Step = 'input' | 'prompts' | 'study' | 'quiz' | 'export' | 'admin' | 'learn';
 type Theme = 'dark' | 'light';
 type InputType = 'text' | 'file' | 'url';
+
+/**
+ * 步骤条顺序。步骤之间不做线性锁定：任意一步可直接跳转（复习、测验、导出
+ * 不要求先"完成"前面的步骤），空数据由各自的视图空态或 EmptyStage 兜底。
+ */
+const STEPS: Array<{ id: Step; label: string }> = [
+  { id: 'input', label: '输入' },
+  { id: 'prompts', label: '提示词' },
+  { id: 'study', label: '复习' },
+  { id: 'quiz', label: '测验' },
+  { id: 'export', label: '导出' },
+];
 
 // B 模型改进建议的单条改写项（类型从 SelfCheckResult.improvedModules 推导）
 type ImprovedMod = NonNullable<SelfCheckResult['improvedModules']>[number];
@@ -97,9 +109,14 @@ function getInitialCards(): SM2Card[] {
 export default function App() {
   const [step, setStep] = useState<Step>('input');
   const [input, setInput] = useState('');
-  const [stylePresetId, setStylePresetId] = useState('flat');
-  const [, setSettingsTick] = useState(0);
-  const useMock = getSettings().mock;
+  // 默认视觉风格来自后台设置（'auto' = 跟随 AI 推荐），不再硬编码 flat
+  const [stylePresetId, setStylePresetId] = useState(getSettings().ui.stylePresetId);
+  const [settingsTick, setSettingsTick] = useState(0);
+  const cfg = getSettings();
+  const useMock = cfg.mock;
+  /** 应用标识（后台设置可改）：导航栏标题、副标题、浏览器标签页 */
+  const appName = cfg.app.name;
+  const appSubtitle = cfg.app.subtitle;
   const [pages, setPages] = useState<PageData[]>([]);
   const [seriesTitle, setSeriesTitle] = useState('');
   const [seriesStyle, setSeriesStyle] = useState<ModuleStyle | null>(null);
@@ -151,9 +168,10 @@ export default function App() {
   // 学习页：扩写后的完整学习内容 + 扩写状态
   const [learnData, setLearnData] = useState<Map<string, LearnModule> | null>(null);
   const [learnBusy, setLearnBusy] = useState(false);
-  const [showPageNumber, setShowPageNumber] = useState(false);
-  const [pageBadgePos, setPageBadgePos] = useState<PageBadgePos>('tr');
-  const [pageBadgeFormat, setPageBadgeFormat] = useState<PageBadgeFormat>('cn');
+  // 页码角标：初值取后台设置的默认输出选项
+  const [showPageNumber, setShowPageNumber] = useState(getSettings().ui.pageNumber);
+  const [pageBadgePos, setPageBadgePos] = useState<PageBadgePos>(getSettings().ui.pagePos);
+  const [pageBadgeFormat, setPageBadgeFormat] = useState<PageBadgeFormat>(getSettings().ui.pageFormat);
   const [showGraph, setShowGraph] = useState(false);
   const [selectedModuleId, setSelectedModuleId] = useState<string | null>(null);
   // 风格锚点图：App 内直接用当前生图服务商生成（无需外部手动出图）
@@ -169,16 +187,23 @@ export default function App() {
     localStorage.setItem('theme', theme);
   }, [theme]);
 
+  // 浏览器标签页标题跟随设置中的应用名称（index.html 里的静态 title 只是首屏兜底）
+  useEffect(() => {
+    document.title = appSubtitle ? `${appName} · ${appSubtitle}` : appName;
+  }, [appName, appSubtitle]);
+
   // 切换步骤时回到顶部：否则从长页面底部跳转后，新步骤顶部的「← 返回」按钮会被滚出视口，
   // 用户看不到返回入口、误以为"回不去"，只能手动刷新（历史 bug）
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [step]);
 
-  // 防御：学习页依赖本次生成结果，若处于无结果的中间态（learn 视图的渲染条件不满足时会整块空白、
-  // 页面上没有任何返回入口），自动退回输入页，避免把用户困死在当前步骤
+  // 防御：提示词/学习页依赖本次生成结果，若处于无结果的中间态（整块空白、页面上没有返回入口），
+  // 自动退回输入页，避免把用户困死在当前步骤
   useEffect(() => {
-    if (step === 'learn' && (!seriesStyle || pages.length === 0)) setStep('input');
+    const stranded = (step === 'learn' && (!seriesStyle || pages.length === 0))
+      || (step === 'prompts' && pages.length === 0);
+    if (stranded) setStep('input');
   }, [step, seriesStyle, pages.length]);
 
   const showToast = useCallback((m: string) => {
@@ -186,8 +211,30 @@ export default function App() {
     setTimeout(() => setToast(''), 2000);
   }, []);
 
+  /** 步骤跳转：记住来处，返回按钮就能回到用户真正来的那一步（步骤不再线性锁定） */
+  const gotoStep = (next: Step) => {
+    if (next === step) return;
+    prevStepRef.current = step;
+    setStep(next);
+  };
+
+  /** 返回来处；来处就是当前步（首次进入或直接跳转）时：有生成结果回提示词页，没有则回输入页 */
+  const backStep = () => {
+    const target: Step = prevStepRef.current === step
+      ? (pages.length > 0 ? 'prompts' : 'input')
+      : prevStepRef.current;
+    setStep(target);
+  };
+
+  // 学习页是复习的延伸阅读，步骤条上归入「复习」一格
+  const navStep: Step = step === 'learn' ? 'study' : step;
+  const stepIndex = STEPS.findIndex((s) => s.id === navStep);
+
   const rec = useMemo(() => (input.trim().length >= 3 ? recommendStyle(input) : null), [input]);
-  const userOverride = stylePresetId !== rec?.presetId && rec !== null;
+  // 'auto' = 跟随 AI 推荐：解析成模型推荐的预设（无推荐时回退首个预设），
+  // 必须在使用 getPreset 之前完成——getPreset 对未知 id 会静默回退成 flat
+  const effectivePresetId = stylePresetId === 'auto' ? (rec?.presetId ?? STYLE_PRESETS[0].id) : stylePresetId;
+  const userOverride = stylePresetId !== 'auto' && rec !== null && stylePresetId !== rec.presetId;
 
   const moduleMap = useMemo(() => {
     const m = new Map<string, KnowledgeModule>();
@@ -236,6 +283,22 @@ export default function App() {
     setPages(updated);
   }, [pages, seriesStyle, seriesTitle]);
 
+  // 后台设置里的默认风格/输出选项变化时同步到当前会话。
+  // 用 uiRef 比对"上次同步过的值"：只改模型等无关项时不会覆盖用户在输入步骤里的手动选择。
+  const uiRef = useRef(getSettings().ui);
+  useEffect(() => {
+    const ui = getSettings().ui;
+    const prev = uiRef.current;
+    const styleChanged = ui.stylePresetId !== prev.stylePresetId;
+    const badgeChanged = ui.pageNumber !== prev.pageNumber
+      || ui.pagePos !== prev.pagePos
+      || ui.pageFormat !== prev.pageFormat;
+    if (!styleChanged && !badgeChanged) return;
+    uiRef.current = ui;
+    if (styleChanged) setStylePresetId(ui.stylePresetId);
+    if (badgeChanged) applyBadge({ on: ui.pageNumber, pos: ui.pagePos, fmt: ui.pageFormat });
+  }, [settingsTick, applyBadge]);
+
   const handleDecompose = async (content: string) => {
     if (!content.trim()) {
       showToast('请先输入或上传内容');
@@ -247,7 +310,7 @@ export default function App() {
     setAdoptedIds(new Set());
     setUndoStack([]);
     try {
-      const res = await decomposeKnowledge(content, { stylePresetId, mock: getSettings().mock });
+      const res = await decomposeKnowledge(content, { stylePresetId: effectivePresetId, mock: getSettings().mock });
       setRawResult(res);
       const qr = checkQuality(res);
       setQualityReport(qr);
@@ -445,7 +508,7 @@ export default function App() {
     showToast('已撤销，恢复原文');
   };
 
-  const stylePreset = getPreset(stylePresetId);
+  const stylePreset = getPreset(effectivePresetId);
 
   // 概念图谱数据：全部模块 + 当前选中模块（图谱按钮开关 showGraph）
   const allModules = useMemo(() => pages.flatMap((pg) => pg.modules), [pages]);
@@ -602,19 +665,20 @@ export default function App() {
         <div style={S.navLeft}>
           <div style={S.logoIcon}>✦</div>
           <div style={S.logoText}>
-            <span style={S.logoTitle}>提示词工坊</span>
-            <span style={S.logoSub}>Knowledge Card Prompt Workshop</span>
+            <span style={S.logoTitle}>{appName}</span>
+            {appSubtitle && <span style={S.logoSub}>{appSubtitle}</span>}
           </div>
         </div>
         <div style={S.navRight}>
           {useMock && <span style={S.mockBadge}>MOCK</span>}
-          {step !== 'study' && studyCards.length > 0 && (
+          {/* 快捷入口常驻：不必先走完前面的步骤，空数据由各视图空态兜底 */}
+          {step !== 'study' && (
             <button
               style={S.studyBtn}
-              onClick={() => { prevStepRef.current = step; setStudyScope(undefined); setStep('study'); }}
-              title="复习全部到期卡片（逾期最久优先）"
+              onClick={() => { setStudyScope(undefined); gotoStep('study'); }}
+              title="复习闪卡（逾期最久优先）"
             >
-              📚 复习{dueCount > 0 ? (
+              📚 复习{studyCards.length === 0 ? '' : dueCount > 0 ? (
                 <span style={{
                   marginLeft: 6, background: 'var(--error)', color: '#fff',
                   borderRadius: 999, padding: '1px 7px', fontSize: 11, fontWeight: 700,
@@ -622,37 +686,42 @@ export default function App() {
               ) : ' ✓'}
             </button>
           )}
-          <button style={S.iconBtn} onClick={() => { if (step !== 'admin') prevStepRef.current = step; setStep('admin'); }} title="后台管理">
+          {step !== 'quiz' && (
+            <button style={S.navBtn} onClick={() => gotoStep('quiz')} title="按本组知识点出测验题">
+              📝 测验
+            </button>
+          )}
+          {step !== 'export' && (
+            <button style={S.navBtn} onClick={() => gotoStep('export')} title="批量导出全部提示词">
+              📦 批量导出
+            </button>
+          )}
+          <button style={S.iconBtn} onClick={() => gotoStep('admin')} title="后台管理">
             ⚙️
           </button>
           <button style={S.iconBtn} onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} title="切换主题">
             {theme === 'dark' ? '☀️' : '🌙'}
           </button>
-          {step === 'prompts' && (
-            <>
-              <button style={S.studyBtn} onClick={() => setStep('quiz')}>
-                📝 测验
-              </button>
-              <button style={S.studyBtn} onClick={() => setStep('export')}>
-                📦 批量导出
-              </button>
-            </>
-          )}
         </div>
       </nav>
 
-      {/* 步骤指示器（后台管理页不显示） */}
+      {/* 步骤指示器（后台管理页不显示）：可点，任意步骤直接跳转或回退 */}
       {step !== 'admin' && (
       <div style={S.stepBar} className="fade-in">
-        <StepDot active={step === 'input'} done={step === 'prompts' || step === 'study' || step === 'quiz' || step === 'export'} num={1} label="输入" />
-        <div style={{ ...S.stepLine, ...(step !== 'input' ? S.stepLineActive : {}) }} />
-        <StepDot active={step === 'prompts'} done={step === 'study' || step === 'quiz' || step === 'export'} num={2} label="提示词" />
-        <div style={{ ...S.stepLine, ...(step === 'study' || step === 'quiz' || step === 'export' ? S.stepLineActive : {}) }} />
-        <StepDot active={step === 'study'} done={step === 'quiz' || step === 'export'} num={3} label="复习" />
-        <div style={{ ...S.stepLine, ...(step === 'quiz' || step === 'export' ? S.stepLineActive : {}) }} />
-        <StepDot active={step === 'quiz'} done={step === 'export'} num={4} label="测验" />
-        <div style={{ ...S.stepLine, ...(step === 'export' ? S.stepLineActive : {}) }} />
-        <StepDot active={step === 'export'} done={false} num={5} label="导出" />
+        {STEPS.map((s, i) => (
+          <Fragment key={s.id}>
+            {i > 0 && (
+              <div style={{ ...S.stepLine, ...(stepIndex >= i ? S.stepLineActive : {}) }} />
+            )}
+            <StepDot
+              active={navStep === s.id}
+              done={stepIndex > i}
+              num={i + 1}
+              label={s.label}
+              onClick={() => gotoStep(s.id)}
+            />
+          </Fragment>
+        ))}
       </div>
       )}
 
@@ -774,6 +843,13 @@ export default function App() {
             <div style={S.field}>
               <label style={S.label}>视觉风格</label>
               <div style={S.chipWrap}>
+                <button
+                  style={{ ...S.chip, ...(stylePresetId === 'auto' ? S.chipActive : {}) }}
+                  onClick={() => setStylePresetId('auto')}
+                  title="每次生成时按输入内容自动推荐风格（后台管理可改默认值）"
+                >
+                  ✨ 跟随 AI
+                </button>
                 {STYLE_PRESETS.map((p) => (
                   <button
                     key={p.id}
@@ -861,7 +937,7 @@ export default function App() {
             {/* 系列信息卡 */}
             <div style={S.seriesCard}>
               <div style={S.seriesLeft}>
-                <button style={S.backBtn} onClick={() => setStep('input')}>← 返回</button>
+                <button style={S.backBtn} onClick={() => gotoStep('input')}>← 返回</button>
                 <div>
                   <div style={S.seriesKicker}>{stylePreset.label} · {pages.length} 页 · {studyCards.length} 张闪卡</div>
                   <h2 style={S.seriesTitle}>{seriesTitle}</h2>
@@ -870,7 +946,7 @@ export default function App() {
               <div style={S.seriesBtns}>
                 <button
                   style={S.ghostBtn}
-                  onClick={() => { prevStepRef.current = step; setStudyScope(seriesTitle); setStep('study'); }}
+                  onClick={() => { setStudyScope(seriesTitle); gotoStep('study'); }}
                 >
                   复习
                 </button>
@@ -1024,7 +1100,7 @@ export default function App() {
                 modules: pg.modules.map(m => byId.get(m.id) ?? m),
               })));
             }}
-            onBack={() => setStep('prompts')}
+            onBack={backStep}
           />
         )}
 
@@ -1033,19 +1109,19 @@ export default function App() {
             cards={studyCards}
             onCardsChange={setStudyCards}
             filterSource={studyScope}
-            onBack={() => setStep(prevStepRef.current === 'study' ? 'prompts' : prevStepRef.current)}
+            onBack={backStep}
           />
         )}
 
         {step === 'quiz' && (
           <QuizView
             modules={pages.flatMap(pg => pg.modules)}
-            onBack={() => setStep('prompts')}
+            onBack={backStep}
             onToast={showToast}
           />
         )}
 
-        {step === 'export' && (
+        {step === 'export' && pages.length > 0 && seriesStyle && (
           <BatchExportView
             pages={pages.map(pg => ({
               id: pg.page.id,
@@ -1055,15 +1131,25 @@ export default function App() {
               visualHint: pg.page.visualHint,
             }))}
             prompts={pages.map(pg => pg.prompt)}
-            style={seriesStyle!}
+            style={seriesStyle}
             seriesTitle={seriesTitle}
-            onBack={() => setStep('prompts')}
+            onBack={backStep}
             onToast={showToast}
           />
         )}
 
+        {step === 'export' && (pages.length === 0 || !seriesStyle) && (
+          <EmptyStage
+            icon="📦"
+            title="还没有可导出的内容"
+            desc="先在「输入」页生成提示词，再回到这里批量导出。"
+            actionLabel="去输入页"
+            onAction={() => gotoStep('input')}
+          />
+        )}
+
         {step === 'admin' && (
-          <AdminView onBack={() => setStep(prevStepRef.current)} onToast={showToast} />
+          <AdminView onBack={backStep} onToast={showToast} />
         )}
         </StepErrorBoundary>
       </main>
@@ -1075,12 +1161,26 @@ export default function App() {
 
 // ===================== 子组件 =====================
 
-function StepDot({ active, done, num, label }: { active: boolean; done: boolean; num: number; label: string }) {
+/** 通用空态：当前步骤没有可展示的数据时兜底，并提供明确的出路 */
+function EmptyStage({ icon, title, desc, actionLabel, onAction }: { icon: string; title: string; desc: string; actionLabel?: string; onAction?: () => void }) {
   return (
-    <div style={{ ...S.stepDot, ...(active ? S.stepDotActive : {}) }}>
+    <div style={S.emptyStage} className="fade-in">
+      <div style={S.emptyIcon}>{icon}</div>
+      <div style={S.emptyTitle}>{title}</div>
+      <div style={S.emptyDesc}>{desc}</div>
+      {actionLabel && onAction && (
+        <button style={S.ghostBtn} onClick={onAction}>{actionLabel}</button>
+      )}
+    </div>
+  );
+}
+
+function StepDot({ active, done, num, label, onClick }: { active: boolean; done: boolean; num: number; label: string; onClick?: () => void }) {
+  return (
+    <button type="button" style={{ ...S.stepDot, ...(done ? { borderColor: 'var(--accent)' } : {}), ...(active ? S.stepDotActive : {}), cursor: 'pointer' }} onClick={onClick} title={`跳转到「${label}」`}>
       <span style={S.stepNum}>{num}</span>
       <span style={S.stepLabel}>{label}</span>
-    </div>
+    </button>
   );
 }
 
@@ -1587,6 +1687,18 @@ const S: Record<string, React.CSSProperties> = {
     boxShadow: 'var(--shadow-glow)',
     transition: 'transform .15s',
   },
+  // 导航栏常驻入口：低调 ghost 样式，避免和「复习」主按钮抢视觉焦点
+  navBtn: {
+    fontSize: 12.5,
+    fontWeight: 600,
+    color: 'var(--text-secondary)',
+    background: 'transparent',
+    border: '1px solid var(--border)',
+    borderRadius: 10,
+    padding: '7px 12px',
+    cursor: 'pointer',
+    transition: 'background .2s',
+  },
 
   // —— 步骤条 ——
   stepBar: {
@@ -1633,6 +1745,22 @@ const S: Record<string, React.CSSProperties> = {
     zIndex: 0,
   },
   stepLineActive: { background: 'var(--accent-gradient)' },
+
+  // —— 空态 ——
+  emptyStage: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 10,
+    padding: '64px 24px',
+    border: '1px dashed var(--border)',
+    borderRadius: 16,
+    background: 'var(--surface)',
+    textAlign: 'center',
+  },
+  emptyIcon: { fontSize: 36 },
+  emptyTitle: { fontSize: 17, fontWeight: 700, color: 'var(--text-primary)' },
+  emptyDesc: { fontSize: 13.5, color: 'var(--text-secondary)', maxWidth: 380, lineHeight: 1.6 },
 
   // —— 主内容 ——
   main: {},
