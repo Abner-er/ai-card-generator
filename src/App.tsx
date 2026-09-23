@@ -1,1290 +1,2475 @@
-import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import type {
-  CardTemplate, CardContent, AIConfig, WorkflowStage,
-  KnowledgeBase, CardData, VisualPrompt, StylePreset,
-  KnowledgeModule, ContentSection, StageNumber,
-} from './types';
-import { templates, stylePresets, getTemplateById } from './templates';
-import { KnowledgeService } from './services/knowledgeService';
-import { ContentGenerationService } from './services/contentService';
-import { ImageGenerationService } from './services/imageService';
-import { PromptBuilder } from './services/promptBuilder';
-import { CardDesignService } from './services/cardDesignService';
-import { ExportService } from './services/exportService';
-import type { ExportCardParams } from './services/exportService';
-import { ProjectService } from './services/projectService';
-import { AdaptiveCardRenderer } from './components/AdaptiveCardRenderer';
-import { CardRenderer } from './components/CardRenderer';
-import { RichCardRenderer } from './components/RichCardRenderer';
-import { KnowledgeCardRenderer } from './components/KnowledgeCardRenderer';
-import { TemplatePreview } from './components/TemplatePreview';
+/**
+ * App.tsx — 知识卡片 · 提示词工坊
+ *
+ * 设计方向：Soft Glass（柔软玻璃感）
+ * - 天蓝→靛蓝渐变主色，深灰蓝背景
+ * - 半透明玻璃卡片 + backdrop-filter 模糊
+ * - 12-16px 大圆角，柔和阴影
+ * - DM Sans 字体，现代工具感
+ *
+ * 两步流程：
+ * ① 输入主题 / 文本 + 风格预设 → AI 拆解知识模块并自动分组为页面
+ * ② 每页展示一条手抄报式生图提示词（多模块融合），支持复制 / 导出
+ *
+ * 新增：内容质量自检（规则快检 + LLM 交叉自检）
+ * 新增：暗黑 / 亮色主题切换（CSS 变量驱动）
+ * 新增：图片页码编号开关
+ * 新增：间隔重复学习系统（SM-2 算法）
+ * 新增：多格式输入（PDF/Markdown/网页）
+ */
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CardPage, DecomposedModule, DecomposeResult, KnowledgeModule, ModuleStyle } from './blocks/types';
+import { STYLE_PRESETS, getPreset, buildPagePrompt, buildAnchorPrompt, REFERENCE_WORKFLOW, recommendStyle } from './blocks/styleEngine';
+import type { PageBadgePos, PageBadgeFormat } from './blocks/styleEngine';
+import { decomposeKnowledge } from './blocks/decompose';
+import { checkQuality, type QualityReport, type QualityIssue } from './blocks/qualityCheck';
+import { diffTokens } from './blocks/textDiff';
+import { selfCheckContent, type SelfCheckResult, type SelfCheckIssue } from './blocks/selfCheck';
+import { extractFromURL } from './blocks/contentExtractor';
+import { expandForLearn } from './blocks/expandForLearn';
+import type { LearnModule } from './blocks/types';
+import StudyView from './StudyView';
+import QuizView from './QuizView';
+import LearnBrowseView from './LearnBrowseView';
+import BatchExportView from './BatchExportView';
+import type { SM2Card } from './blocks/spacedRepetition';
+import { getDueCards, mergeGeneratedCards } from './blocks/spacedRepetition';
 
-// 默认配置 — API Key 由服务端代理持有，不暴露给前端
-const DEFAULT_AI_CONFIG: AIConfig = {
-  baseURL: import.meta.env.VITE_API_BASE_URL || '/ai-api',
-  textModel: import.meta.env.VITE_TEXT_MODEL || 'agnes-2.5-flash',
-  imageModel: import.meta.env.VITE_IMAGE_MODEL || 'agnes-image-2.1-flash',
-  imageSize: import.meta.env.VITE_IMAGE_SIZE || '1024x1536',
-  imageRatio: '3:4',
-};
+import CardGallery from './CardGallery';
+import ConceptGraph from './ConceptGraph';
+import AdminView from './AdminView';
+// pdfjs 主体懒加载（见 extractPDF），worker 是独立静态资源、不增加主 bundle
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import StepErrorBoundary from './StepErrorBoundary';
+import { getSettings, loadRuntimeSettings, saveRuntimeSettings, subscribe } from './blocks/settings';
+import { getImageProvider } from './blocks/imageProvider';
 
-const EMPTY_CONTENT: CardContent = {
-  title: '', subtitle: '', body: '', footer: '', tags: [],
-};
+type Step = 'input' | 'prompts' | 'study' | 'quiz' | 'export' | 'admin' | 'learn';
+type Theme = 'dark' | 'light';
+type InputType = 'text' | 'file' | 'url';
 
-// 六阶段定义（含 Stage 4.5 AI 卡片设计）
-  const STAGES: { num: StageNumber; key: string; label: string; icon: string }[] = [
-    { num: 1, key: 'knowledge', label: '知识检索', icon: '🔍' },
-    { num: 2, key: 'content', label: '内容生成', icon: '✍️' },
-    { num: 3, key: 'prompt', label: 'Prompt工程', icon: '🎨' },
-    { num: 4, key: 'image', label: 'AI出图', icon: '🖼️' },
-    { num: 4.5 as any, key: 'design', label: 'AI卡片设计', icon: '✨' },
-    { num: 5, key: 'typeset', label: '排版导出', icon: '📐' },
-  ];
+// B 模型改进建议的单条改写项（类型从 SelfCheckResult.improvedModules 推导）
+type ImprovedMod = NonNullable<SelfCheckResult['improvedModules']>[number];
+// 改进建议的 UI 消费结构：建议内容 + 是否已采纳 + 采纳前原文（用于对比与撤销展示）
+interface ImprovementEntry {
+  imp: ImprovedMod;
+  adopted: boolean;
+  before?: DecomposedModule;
+}
 
-const App: React.FC = () => {
-  // ===== 工作流状态 =====
-  const [stage, setStage] = useState<WorkflowStage>('input');
-  const [topic, setTopic] = useState('');
+/** 对比展示只需要内容三字段（不依赖运行时装饰字段） */
+type ContentLike = Pick<DecomposedModule, 'title' | 'body' | 'bullets'>;
 
-  // 模板与风格
-  const [selectedTemplate, setSelectedTemplate] = useState<CardTemplate>(templates[0]);
-  const [selectedStylePreset, setSelectedStylePreset] = useState<StylePreset>(stylePresets[0]);
+/** 把 B 模型建议字段并入现有模块，得到“采纳后”版本（未提供的字段保留原文） */
+function buildAfter(current: DecomposedModule, imp: ImprovedMod): DecomposedModule {
+  return {
+    ...current,
+    title: imp.title?.trim() || current.title,
+    body: imp.body?.trim() || current.body,
+    bullets: imp.bullets?.length ? imp.bullets : current.bullets,
+  };
+}
 
-  // AI配置
-  const [aiConfig, setAiConfig] = useState<AIConfig>(DEFAULT_AI_CONFIG);
+interface PageData {
+  page: CardPage;
+  modules: KnowledgeModule[];
+  prompt: string;
+}
 
-  // 项目数据
-  const [knowledge, setKnowledge] = useState<KnowledgeBase | null>(null);
-  const [cards, setCards] = useState<CardData[]>([]);
-  const [activeCardIndex, setActiveCardIndex] = useState(0);
+function getInitialTheme(): Theme {
+  const saved = localStorage.getItem('theme');
+  if (saved === 'light' || saved === 'dark') return saved;
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
 
-  // UI状态
-  const [status, setStatus] = useState('');
-  const [errorMsg, setErrorMsg] = useState('');
-  const [previewScale, setPreviewScale] = useState(0.35);
-  const [imageProgress, setImageProgress] = useState({ current: 0, total: 0, msg: '' });
-  const [designProgress, setDesignProgress] = useState({ current: 0, total: 0, msg: '' });
+function getInitialCards(): SM2Card[] {
+  try {
+    const saved = localStorage.getItem('study-cards');
+    if (saved) {
+      return JSON.parse(saved);
+    }
+  } catch (e) {
+    console.warn('Failed to load study cards:', e);
+  }
+  return [];
+}
 
-  // Refs
-  const cardRef = useRef<HTMLDivElement>(null);
-  const previewContainerRef = useRef<HTMLDivElement>(null);
-  const knowledgeServiceRef = useRef(new KnowledgeService(DEFAULT_AI_CONFIG));
-  const contentServiceRef = useRef(new ContentGenerationService(DEFAULT_AI_CONFIG));
-  const imageServiceRef = useRef(new ImageGenerationService(DEFAULT_AI_CONFIG));
-  const cardDesignServiceRef = useRef(new CardDesignService(DEFAULT_AI_CONFIG));
+export default function App() {
+  const [step, setStep] = useState<Step>('input');
+  const [input, setInput] = useState('');
+  const [stylePresetId, setStylePresetId] = useState('flat');
+  const [, setSettingsTick] = useState(0);
+  const useMock = getSettings().mock;
+  const [pages, setPages] = useState<PageData[]>([]);
+  const [seriesTitle, setSeriesTitle] = useState('');
+  const [seriesStyle, setSeriesStyle] = useState<ModuleStyle | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState('');
+  // 生成失败时的持久红色错误条（toast 2 秒就消失，单靠它用户看不清失败原因）
+  const [genError, setGenError] = useState('');
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
 
-  // 自动计算缩放
-  useEffect(() => {
-    const calc = () => {
-      if (previewContainerRef.current) {
-        const w = previewContainerRef.current.clientWidth - 48;
-        const h = previewContainerRef.current.clientHeight - 48;
-        setPreviewScale(Math.min(w / selectedTemplate.canvas.width, h / selectedTemplate.canvas.height, 1));
-      }
-    };
-    calc();
-    window.addEventListener('resize', calc);
-    return () => window.removeEventListener('resize', calc);
-  }, [selectedTemplate]);
-
-  // 初始化 PromptBuilder 的 AI 改写器
-  useEffect(() => {
-    PromptBuilder.configureRewriter({
-      baseURL: aiConfig.baseURL,
-      textModel: aiConfig.textModel,
+  // 间隔重复学习状态
+  const [studyCards, setStudyCards] = useState<SM2Card[]>(getInitialCards);
+  const [inputType, setInputType] = useState<InputType>('text');
+  // 上传文件后的持久反馈（避开仅弹 toast 造成的「看着没加载」歧义）
+  const [loadedFile, setLoadedFile] = useState<{ name: string; chars: number; truncated: boolean; preview: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const prevStepRef = useRef<Step>('input');
+  // 复习范围：undefined = 全局到期队列；字符串 = 只复习该系列（组内入口）
+  const [studyScope, setStudyScope] = useState<string | undefined>(undefined);
+  // 闪卡 id 的生成批次前缀：模块 id 是 m1/m2… 序号，跨系列必然重复，
+  // 不加批次前缀会导致第二次生成的卡与第一次撞 id（历史 bug：整组被去重丢弃）
+  const [genTag, setGenTag] = useState(() => `g${Date.now().toString(36)}`);
+  const cardIdOf = useCallback((moduleId: string) => `card-${genTag}-${moduleId}`, [genTag]);
+  const dueCount = useMemo(() => getDueCards(studyCards).length, [studyCards]);
+  // 图卡联动：图文卡落库后给对应闪卡打「有图」标记（stable 引用，供 CardGallery 回调）
+  const markCardImage = useCallback((cardId: string) => {
+    setStudyCards((prev) => {
+      const target = prev.find((c) => c.id === cardId);
+      if (!target || target.hasImage) return prev;
+      return prev.map((c) => (c.id === cardId ? { ...c, hasImage: true } : c));
     });
-    cardDesignServiceRef.current.updateConfig(aiConfig);
-  }, [aiConfig.baseURL, aiConfig.textModel]);
+  }, []);
 
-  // ===== 当前阶段编号 =====
-  const currentStageNum = useCallback((): StageNumber | 0 => {
-    const map: Record<string, StageNumber | 0> = {
-      'input': 0,
-      'generating-knowledge': 1, 'review-knowledge': 1,
-      'generating-content': 2, 'review-content': 2,
-      'generating-prompt': 3, 'review-prompt': 3,
-      'generating-image': 4, 'review-image': 4,
-      'designing-card': 4.5, 'review-design': 4.5,
-      'typeset': 5, 'done': 5,
+  // 持久化学习卡片
+  useEffect(() => {
+    localStorage.setItem('study-cards', JSON.stringify(studyCards));
+  }, [studyCards]);
+
+  // 启动时拉取后台配置（server/local 模式自动判定）；配置变更时刷新 UI
+  useEffect(() => {
+    loadRuntimeSettings().then(() => setSettingsTick(t => t + 1));
+    return subscribe(() => setSettingsTick(t => t + 1));
+  }, []);
+
+  const [rawResult, setRawResult] = useState<DecomposeResult | null>(null);
+  const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
+  const [selfCheckResult, setSelfCheckResult] = useState<SelfCheckResult | null>(null);
+  const [selfCheckBusy, setSelfCheckBusy] = useState(false);
+  const [showIssues, setShowIssues] = useState(true);
+  // 学习页：扩写后的完整学习内容 + 扩写状态
+  const [learnData, setLearnData] = useState<Map<string, LearnModule> | null>(null);
+  const [learnBusy, setLearnBusy] = useState(false);
+  const [showPageNumber, setShowPageNumber] = useState(false);
+  const [pageBadgePos, setPageBadgePos] = useState<PageBadgePos>('tr');
+  const [pageBadgeFormat, setPageBadgeFormat] = useState<PageBadgeFormat>('cn');
+  const [showGraph, setShowGraph] = useState(false);
+  const [selectedModuleId, setSelectedModuleId] = useState<string | null>(null);
+  // 风格锚点图：App 内直接用当前生图服务商生成（无需外部手动出图）
+  const [anchorImg, setAnchorImg] = useState<string | null>(null);
+  const [anchorBusy, setAnchorBusy] = useState(false);
+
+  // B 模型改进建议的采纳状态（可撤销）
+  const [adoptedIds, setAdoptedIds] = useState<Set<string>>(new Set());
+  const [undoStack, setUndoStack] = useState<Array<{ id: string; before: DecomposedModule }>>([]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  // 切换步骤时回到顶部：否则从长页面底部跳转后，新步骤顶部的「← 返回」按钮会被滚出视口，
+  // 用户看不到返回入口、误以为"回不去"，只能手动刷新（历史 bug）
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [step]);
+
+  // 防御：学习页依赖本次生成结果，若处于无结果的中间态（learn 视图的渲染条件不满足时会整块空白、
+  // 页面上没有任何返回入口），自动退回输入页，避免把用户困死在当前步骤
+  useEffect(() => {
+    if (step === 'learn' && (!seriesStyle || pages.length === 0)) setStep('input');
+  }, [step, seriesStyle, pages.length]);
+
+  const showToast = useCallback((m: string) => {
+    setToast(m);
+    setTimeout(() => setToast(''), 2000);
+  }, []);
+
+  const rec = useMemo(() => (input.trim().length >= 3 ? recommendStyle(input) : null), [input]);
+  const userOverride = stylePresetId !== rec?.presetId && rec !== null;
+
+  const moduleMap = useMemo(() => {
+    const m = new Map<string, KnowledgeModule>();
+    pages.forEach((pg) => pg.modules.forEach((mod) => m.set(mod.id, mod)));
+    return m;
+  }, [pages]);
+
+  // 学习页：把扩写结果（fullBody/fullBullets/notes）合并进模块
+  const mergedLearnModules = useMemo(() => {
+    if (!learnData) return pages.flatMap((pg) => pg.modules);
+    return pages.flatMap((pg) => pg.modules).map((m) => {
+      const lr = learnData.get(m.id);
+      if (!lr) return m;
+      return { ...m, fullBody: lr.fullBody, fullBullets: lr.fullBullets, notes: lr.notes };
+    });
+  }, [pages, learnData]);
+
+  const improvementInfo = useMemo(() => {
+    const m = new Map<string, ImprovementEntry>();
+    selfCheckResult?.improvedModules?.forEach((imp) => {
+      let before: DecomposedModule | undefined;
+      for (let i = undoStack.length - 1; i >= 0; i--) {
+        if (undoStack[i].id === imp.id) { before = undoStack[i].before; break; }
+      }
+      m.set(imp.id, { imp, adopted: adoptedIds.has(imp.id), before });
+    });
+    return m;
+  }, [selfCheckResult, adoptedIds, undoStack]);
+
+  /** 页码开关/位置/格式任一变化时，重建所有页面的提示词 */
+  const applyBadge = useCallback((next: { on: boolean; pos: PageBadgePos; fmt: PageBadgeFormat }) => {
+    setShowPageNumber(next.on);
+    setPageBadgePos(next.pos);
+    setPageBadgeFormat(next.fmt);
+    if (pages.length === 0 || !seriesStyle) return;
+    const updated = pages.map((pg, i) => ({
+      ...pg,
+      prompt: buildPagePrompt(pg.page, pg.modules, seriesStyle, {
+        seriesTitle,
+        pageNumber: next.on ? i + 1 : undefined,
+        totalPages: next.on ? pages.length : undefined,
+        pagePos: next.pos,
+        pageFormat: next.fmt,
+      }),
+    }));
+    setPages(updated);
+  }, [pages, seriesStyle, seriesTitle]);
+
+  const handleDecompose = async (content: string) => {
+    if (!content.trim()) {
+      showToast('请先输入或上传内容');
+      return;
+    }
+    setGenError('');
+    setBusy(true);
+    setSelfCheckResult(null);
+    setAdoptedIds(new Set());
+    setUndoStack([]);
+    try {
+      const res = await decomposeKnowledge(content, { stylePresetId, mock: getSettings().mock });
+      setRawResult(res);
+      const qr = checkQuality(res);
+      setQualityReport(qr);
+
+      const style = res.seriesStyle;
+      const moduleMap = new Map<string, KnowledgeModule>();
+      res.modules.forEach((m, i) => {
+        moduleMap.set(m.id, { ...m, status: 'done', order: i, enabled: true, span: 'half' });
+      });
+      const pageList: PageData[] = res.pages.map((pg, i) => {
+        const mods = pg.moduleIds
+          .map((id) => moduleMap.get(id))
+          .filter((m): m is KnowledgeModule => !!m);
+        return {
+          page: pg,
+          modules: mods,
+          prompt: buildPagePrompt(pg, mods, style, {
+            seriesTitle: res.seriesTitle,
+            pageNumber: showPageNumber ? i + 1 : undefined,
+            totalPages: showPageNumber ? res.pages.length : undefined,
+            pagePos: showPageNumber ? pageBadgePos : undefined,
+            pageFormat: showPageNumber ? pageBadgeFormat : undefined,
+          }),
+        };
+      });
+      setPages(pageList);
+      setSeriesTitle(res.seriesTitle);
+      setSeriesStyle(style);
+
+      // 生成闪卡并保存：id 带本次批次前缀，避免跨系列撞 id；
+      // 合并语义 = 同名系列整组替换、不同系列共存（mergeGeneratedCards）
+      const tag = `g${Date.now().toString(36)}`;
+      setGenTag(tag);
+      const newCards: SM2Card[] = res.modules.map((m) => ({
+        id: `card-${tag}-${m.id}`,
+        question: m.title,
+        answer: m.body,
+        nextReview: new Date().toISOString(),
+        easeFactor: getSettings().study.initialEase,
+        interval: 0,
+        repetitions: 0,
+        createdAt: new Date().toISOString(),
+        status: 'new',
+        source: res.seriesTitle,
+      }));
+      setStudyCards((prev) => mergeGeneratedCards(prev, newCards));
+
+      setStep('prompts');
+      showToast(`生成 ${pageList.length} 页 · 质检发现 ${qr.issues.length} 个问题 · 本组闪卡 ${newCards.length} 张`);
+
+      // 后台自动扩写学习内容（不阻塞主流程；失败时学习页按骨架显示并 toast 提示）
+      runExpandLearn(res.modules, res.seriesStyle);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '生成失败';
+      setGenError(msg); // 持久展示，用户能看清到底哪儿失败了
+      showToast(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 后台扩写学习内容：进入学习页可浏览完整内容；若进行中则用骨架兜底 */
+  const runExpandLearn = useCallback(async (
+    modules: DecomposedModule[],
+    style: ModuleStyle,
+  ) => {
+    setLearnBusy(true);
+    try {
+      const map = await expandForLearn(modules, style, { mock: getSettings().mock });
+      setLearnData(map);
+    } catch (e) {
+      // 扩写失败：学习页按骨架显示（不再伪造"已扩写"内容），并提示用户
+      showToast(e instanceof Error ? e.message : '学习内容扩写失败，将显示精简版');
+    } finally {
+      setLearnBusy(false);
+    }
+  }, []);
+
+  const handleSelfCheck = async () => {
+    if (!rawResult) return;
+    setSelfCheckBusy(true);
+    try {
+      const result = await selfCheckContent(rawResult, { mock: getSettings().mock });
+      setSelfCheckResult(result);
+      // 新一轮质检：上一轮采纳已固化进内容，采纳/撤销状态清零，避免新建议被旧状态误标
+      setAdoptedIds(new Set());
+      setUndoStack([]);
+      const n = result.issues.length;
+      showToast(n > 0 ? `AI 质检发现 ${n} 个问题` : 'AI 质检通过，未发现明显问题');
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : '质检失败');
+    } finally {
+      setSelfCheckBusy(false);
+    }
+  };
+
+  const copyOne = (prompt: string) => {
+    navigator.clipboard.writeText(prompt);
+    showToast('已复制到剪贴板');
+  };
+
+  /** 用新模块列表整体提交：更新 rawResult、重跑规则快检、重建页面 prompt、同步闪卡 */
+  const commitModules = (newModules: DecomposedModule[], adds: Array<{ id: string; before: DecomposedModule }>) => {
+    if (!rawResult || !seriesStyle) return;
+    const newRaw = { ...rawResult, modules: newModules };
+    setRawResult(newRaw);
+    setQualityReport(checkQuality(newRaw));
+    setUndoStack((s) => [...s, ...adds]);
+    setAdoptedIds((prev) => {
+      const n = new Set(prev);
+      adds.forEach((a) => n.add(a.id));
+      return n;
+    });
+    // 同步学习闪卡的问答（SM2 复习参数不动）
+    const changed = new Map<string, { question: string; answer: string }>(adds.map((a) => {
+      const after = newModules.find((m) => m.id === a.id)!;
+      return [cardIdOf(a.id), { question: after.title, answer: after.body }] as const;
+    }));
+    setStudyCards((prev) => prev.map((c) => (changed.has(c.id) ? { ...c, ...changed.get(c.id)! } : c)));
+    // 重建各页 prompt（模块内容变了，提示词必须跟着变；装饰字段从现有 pages 保留）
+    const decoMap = new Map<string, KnowledgeModule>();
+    pages.forEach((pg) => pg.modules.forEach((m) => decoMap.set(m.id, m)));
+    const enriched: KnowledgeModule[] = newModules.flatMap((m) => {
+      const cur = decoMap.get(m.id);
+      return cur ? [{ ...cur, ...m }] : [];
+    });
+    const pageList: PageData[] = newRaw.pages.map((pg, i) => {
+      const mods = pg.moduleIds
+        .map((id) => enriched.find((m) => m.id === id))
+        .filter((m): m is KnowledgeModule => !!m);
+      return {
+        page: pg,
+        modules: mods,
+        prompt: buildPagePrompt(pg, mods, seriesStyle, {
+          seriesTitle,
+          pageNumber: showPageNumber ? i + 1 : undefined,
+          totalPages: showPageNumber ? newRaw.pages.length : undefined,
+          pagePos: showPageNumber ? pageBadgePos : undefined,
+          pageFormat: showPageNumber ? pageBadgeFormat : undefined,
+        }),
+      };
+    });
+    setPages(pageList);
+  };
+
+  /** 采纳单条 B 模型修改 */
+  const applyImprovement = (imp: ImprovedMod) => {
+    if (!rawResult) return;
+    const before = rawResult.modules.find((m) => m.id === imp.id);
+    if (!before) {
+      showToast('未找到对应模块，无法采纳');
+      return;
+    }
+    const after = buildAfter(before, imp);
+    commitModules(rawResult.modules.map((m) => (m.id === imp.id ? after : m)), [{ id: imp.id, before }]);
+    showToast('已采纳 B 模型修改 · 规则快检已更新');
+  };
+
+  /** 批量采纳全部未处理的修改建议 */
+  const applyAllImprovements = (list: ImprovedMod[]) => {
+    if (!rawResult) return;
+    let modules = rawResult.modules;
+    const adds: Array<{ id: string; before: DecomposedModule }> = [];
+    list.forEach((imp) => {
+      const before = modules.find((m) => m.id === imp.id);
+      if (!before) return;
+      const after = buildAfter(before, imp);
+      adds.push({ id: imp.id, before });
+      modules = modules.map((m) => (m.id === imp.id ? after : m));
+    });
+    if (!adds.length) return;
+    commitModules(modules, adds);
+    showToast(`已采纳 ${adds.length} 条修改 · 可撤销`);
+  };
+
+  /** 撤销某个模块的采纳，恢复它最近一次被改前的原文 */
+  const undoAdopt = (id: string) => {
+    if (!rawResult) return;
+    let idx = -1;
+    for (let i = undoStack.length - 1; i >= 0; i--) {
+      if (undoStack[i].id === id) { idx = i; break; }
+    }
+    if (idx === -1) return;
+    const rec = undoStack[idx];
+    const newStack = undoStack.filter((_, i) => i !== idx);
+    setUndoStack(newStack);
+    setAdoptedIds((prev) => {
+      const n = new Set(prev);
+      if (!newStack.some((r) => r.id === id)) n.delete(id);
+      return n;
+    });
+    const newModules = rawResult.modules.map((m) => (m.id === id ? rec.before : m));
+    commitModules(newModules, []);
+    setStudyCards((prev) => prev.map((c) => (c.id === cardIdOf(id) ? { ...c, question: rec.before.title, answer: rec.before.body } : c)));
+    showToast('已撤销，恢复原文');
+  };
+
+  const stylePreset = getPreset(stylePresetId);
+
+  // 概念图谱数据：全部模块 + 当前选中模块（图谱按钮开关 showGraph）
+  const allModules = useMemo(() => pages.flatMap((pg) => pg.modules), [pages]);
+  const selectedModule = useMemo(
+    () => allModules.find((m) => m.id === selectedModuleId) ?? null,
+    [allModules, selectedModuleId],
+  );
+
+  /** 风格锚点图提示词：先出这张锁风格，后续每页把它当参考图上传 */
+  const anchorPrompt = seriesStyle ? buildAnchorPrompt(seriesTitle, seriesStyle) : '';
+
+  /** App 内直接生成锚点图：走当前生图服务商（Qwen / SenseNova），生成后下载用于外部生图参考 */
+  const genAnchorImg = async () => {
+    if (!seriesStyle) return;
+    setAnchorBusy(true);
+    try {
+      const prov = getImageProvider(useMock);
+      const url = await prov.generate(buildAnchorPrompt(seriesTitle, seriesStyle), {
+        ratio: '16:9',
+        onProgress: (m) => showToast(m),
+      });
+      setAnchorImg(url);
+      showToast('风格锚点图已生成，外部生图时把它上传作参考图');
+    } catch (e) {
+      showToast('锚点图生成失败：' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setAnchorBusy(false);
+    }
+  };
+
+  const downloadAnchor = () => {
+    if (!anchorImg) return;
+    const a = document.createElement('a');
+    a.href = anchorImg;
+    a.download = `${seriesTitle || 'style'}-anchor.png`;
+    a.click();
+  };
+
+  const copyAll = () => {
+    const all = pages
+      .map((pg, i) => `#${String(i + 1).padStart(2, '0')} ${pg.page.title} (${pg.modules.length} modules)\n\n${pg.prompt}\n`)
+      .join('\n' + '—'.repeat(40) + '\n\n');
+    const full = `${seriesTitle}\n${stylePreset.label} · ${pages.length} pages\n\n【风格锚点图 · 先生成这张，之后每页把它当参考图】\n${anchorPrompt}\n\n${REFERENCE_WORKFLOW}\n\n${'—'.repeat(40)}\n\n${all}`;
+    navigator.clipboard.writeText(full);
+    showToast(`已复制锚点图 + 全部 ${pages.length} 页提示词`);
+  };
+
+  const exportJson = () => {
+    const data = {
+      seriesTitle,
+      stylePreset: stylePreset.id,
+      seriesStyle,
+      quality: qualityReport,
+      selfCheck: selfCheckResult,
+      pages: pages.map((pg) => ({
+        id: pg.page.id,
+        title: pg.page.title,
+        ratio: pg.page.ratio,
+        visualHint: pg.page.visualHint,
+        modules: pg.modules.map((m) => ({
+          id: m.id, type: m.type, title: m.title, body: m.body, bullets: m.bullets, icon: m.icon,
+        })),
+        prompt: pg.prompt,
+      })),
     };
-    return map[stage] ?? 0;
-  }, [stage]);
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${seriesTitle || 'prompts'}-pages.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('已导出 JSON');
+  };
 
-  // ===== 卡片数量（动态化）=====
-  // 对于系列模板（lifecycle/timeline/process），以知识库检索到的实际阶段数量为准
-  // 这样用户输入"知了的一生"时，若只有4个阶段，就只生成4张卡片
-  const templateDefaultCount = selectedTemplate.cardCount || 1;
-  const knowledgeSeriesCount = useMemo(() => {
-    if (!knowledge) return templateDefaultCount;
-    if (knowledge.lifecycleStages?.length) return knowledge.lifecycleStages.length;
-    if (knowledge.timelineEvents?.length) return knowledge.timelineEvents.length;
-    if (knowledge.processSteps?.length) return knowledge.processSteps.length;
-    return templateDefaultCount;
-  }, [knowledge, templateDefaultCount]);
-  const cardCount = knowledge ? knowledgeSeriesCount : templateDefaultCount;
-  const isSeries = cardCount > 1;
+  const exportTxt = () => {
+    const all = pages
+      .map((pg, i) => `#${String(i + 1).padStart(2, '0')} ${pg.page.title} (${pg.modules.length} modules)\n\n${pg.prompt}\n`)
+      .join('\n' + '—'.repeat(40) + '\n\n');
+    const full = `${seriesTitle}\n${stylePreset.label} · ${pages.length} pages\n\n【风格锚点图 · 先生成这张，之后每页把它当参考图】\n${anchorPrompt}\n\n${REFERENCE_WORKFLOW}\n\n${'—'.repeat(40)}\n\n${all}`;
+    const blob = new Blob([full], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${seriesTitle || 'prompts'}-pages.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('已导出 TXT');
+  };
 
-  // ===== 当前活跃卡片 =====
-  const activeCard = cards[activeCardIndex];
-  const activeContent = activeCard?.content || EMPTY_CONTENT;
-  const activeImageUrl = activeCard?.imageUrl || '';
+  // 处理文件上传
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-  // ============================================================
-  // Stage 1: 知识检索
-  // ============================================================
-  const handleStart = useCallback(async () => {
-    if (!topic.trim()) { setErrorMsg('请输入主题'); return; }
-    setStage('generating-knowledge');
-    setStatus('AI正在检索知识...');
-    setErrorMsg('');
-
-    try {
-      knowledgeServiceRef.current.updateConfig(aiConfig);
-      const result = await knowledgeServiceRef.current.retrieve(topic, selectedTemplate.id);
-      setKnowledge(result);
-      setStage('review-knowledge');
-      setStatus('知识检索完成，请审校知识数据');
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : '知识检索失败');
-      setStage('input');
-      setStatus('');
-    }
-  }, [topic, selectedTemplate, aiConfig]);
-
-  // ============================================================
-  // Stage 2: 内容生成（为所有卡片生成内容）
-  // ============================================================
-  const handleGenerateContent = useCallback(async () => {
-    if (!knowledge) return;
-    setStage('generating-content');
-    setStatus('正在为每张卡片生成内容...');
-    setErrorMsg('');
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    let content: string;
 
     try {
-      contentServiceRef.current.updateConfig(aiConfig);
-      const newCards: CardData[] = [];
-
-      for (let i = 0; i < cardCount; i++) {
-        setStatus(`正在生成第${i + 1}/${cardCount}张卡片内容...`);
-        const content = await contentServiceRef.current.generate(knowledge, selectedTemplate, i);
-
-        // 生成卡片阶段标题
-        let cardStage = '';
-        let cardSubtitle = '';
-        if (knowledge.lifecycleStages?.[i]) {
-          cardStage = `${String(i + 1).padStart(2, '0')} ${knowledge.lifecycleStages[i].name}`;
-          cardSubtitle = knowledge.lifecycleStages[i].period;
-        } else if (knowledge.timelineEvents?.[i]) {
-          cardStage = knowledge.timelineEvents[i].title;
-          cardSubtitle = knowledge.timelineEvents[i].year;
-        } else if (knowledge.processSteps?.[i]) {
-          cardStage = `步骤${knowledge.processSteps[i].order}: ${knowledge.processSteps[i].title}`;
-          cardSubtitle = `第${knowledge.processSteps[i].order}步`;
-        } else {
-          cardStage = content.title;
-          cardSubtitle = content.subtitle;
-        }
-
-        newCards.push({
-          id: i + 1,
-          stage: cardStage,
-          subtitle: cardSubtitle,
-          knowledge,
-          content,
-        });
+      if (ext === 'pdf') {
+        content = await extractPDF(file);
+      } else {
+        content = await readFileAsText(file);
       }
 
-      setCards(newCards);
-      setActiveCardIndex(0);
-      setStage('review-content');
-      setStatus('内容生成完成，请逐张审校');
+      // 超出上限按语义截断（按字符数近似估算，避免一次塞入过长的内容拖垮拆解）
+      const MAX_INPUT = 20000;
+      const originalLen = content.length;
+      const truncated = originalLen > MAX_INPUT;
+      if (truncated) content = content.slice(0, MAX_INPUT);
+      setInput(truncated ? content + '\n…（内容较长已截断）' : content);
+      // 存下加载信息，界面上持续显示（toast 2 秒就消失，单靠它用户看不出加载了什么）
+      setLoadedFile({ name: file.name, chars: originalLen, truncated, preview: content.slice(0, 200) });
+      showToast(`已加载 ${file.name}（${originalLen} 字${truncated ? `，超长已截断为 ${content.length}` : ''}）`);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : '内容生成失败');
-      setStage('review-knowledge');
-      setStatus('');
+      showToast('文件读取失败：' + (err instanceof Error ? err.message : '未知错误'));
     }
-  }, [knowledge, selectedTemplate, cardCount, aiConfig]);
 
-  // ============================================================
-  // Stage 3: Prompt工程（为所有卡片生成六段式Prompt）
-  // 启用大模型改写：每张卡片都让 AI 根据当前阶段内容改写 prompt，
-  // 避免出现与阶段冲突的元素（如成虫里出现蛋）
-  // ============================================================
-  const handleGeneratePrompts = useCallback(async () => {
-    if (!knowledge || cards.length === 0) return;
-    setStage('generating-prompt');
-    setStatus('AI正在为每张卡片改写生成式提示词...');
-    setErrorMsg('');
+    // 清空 input 以便重复上传同一文件
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
 
+  // 处理 URL 提取（服务端代理抓取正文，失败会明确报错，不再静默降级）
+  const handleURLSubmit = async () => {
+    let url = input.trim();
+    if (!url) {
+      showToast('请输入有效的 URL');
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+
+    setBusy(true);
     try {
-      const updatedCards: CardData[] = [];
-      const total = cards.length;
-
-      for (let idx = 0; idx < total; idx++) {
-        const card = cards[idx];
-        setStatus(`正在生成第 ${idx + 1}/${total} 张的AI改写Prompt...`);
-
-        // 优先调用大模型改写 prompt，失败时自动 fallback 到模板版
-        const prompt = await PromptBuilder.buildVisualPromptAsync(
-          knowledge,
-          card.content!,
-          selectedTemplate,
-          selectedStylePreset,
-          idx,
-          total,
-        );
-
-        updatedCards.push({ ...card, prompt });
+      const result = await extractFromURL(url, { mock: getSettings().mock });
+      if (result.content.trim().length < 8) {
+        throw new Error('提取到的正文过短，请改为复制粘贴文本');
       }
-
-      setCards(updatedCards);
-      setStage('review-prompt');
-      setStatus('Prompt生成完成（已使用AI改写），请查看并可微调');
+      const hasTitle = result.title && !result.content.includes(result.title);
+      setInput(hasTitle ? `# ${result.title}\n\n${result.content}` : result.content);
+      showToast(`已提取《${result.title || url.slice(0, 30)}》正文 ${result.wordCount} 字`); // allow-truncation: toast 里 URL 展示截断
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Prompt生成失败');
-      setStage('review-content');
-      setStatus('');
-    }
-  }, [knowledge, cards, selectedTemplate, selectedStylePreset]);
-
-  // ============================================================
-  // Stage 4: AI出图（为所有卡片生成图片，含限流）
-  // ============================================================
-  const handleGenerateImages = useCallback(async () => {
-    if (cards.length === 0) return;
-    setStage('generating-image');
-    setErrorMsg('');
-    setImageProgress({ current: 0, total: cards.length, msg: '开始生成图片...' });
-
-    try {
-      imageServiceRef.current.updateConfig(aiConfig);
-      const updatedCards = [...cards];
-
-      for (let i = 0; i < updatedCards.length; i++) {
-        if (!updatedCards[i].prompt) continue;
-        setImageProgress({ current: i + 1, total: cards.length, msg: `正在生成第${i + 1}/${cards.length}张图片...` });
-        setStatus(`正在生成第${i + 1}/${cards.length}张图片...`);
-
-        const url = await imageServiceRef.current.generateFromVisualPrompt(
-          updatedCards[i].prompt!,
-          (msg) => setImageProgress({ current: i + 1, total: cards.length, msg }),
-        );
-        updatedCards[i] = { ...updatedCards[i], imageUrl: url, imageStatus: 'done' };
-        setCards([...updatedCards]);
-      }
-
-      setStage('review-image');
-      setStatus('所有图片生成完成，请审校');
-      setImageProgress({ current: 0, total: 0, msg: '' });
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : '图片生成失败');
-      setStage('review-prompt');
-      setStatus('');
-      setImageProgress({ current: 0, total: 0, msg: '' });
-    }
-  }, [cards, aiConfig]);
-
-  // ===== 单张重新生成图片 =====
-  const handleRegenerateImage = useCallback(async (cardIndex: number) => {
-    if (!cards[cardIndex]?.prompt) return;
-    setStatus(`正在重新生成第${cardIndex + 1}张图片...`);
-    setErrorMsg('');
-    try {
-      imageServiceRef.current.updateConfig(aiConfig);
-      const url = await imageServiceRef.current.generateFromVisualPrompt(
-        cards[cardIndex].prompt!,
-        (msg) => setStatus(msg),
-      );
-      const updatedCards = [...cards];
-      updatedCards[cardIndex] = { ...updatedCards[cardIndex], imageUrl: url, imageStatus: 'done' };
-      setCards(updatedCards);
-      setStatus('图片重新生成完成');
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : '图片重新生成失败');
-      setStatus('');
-    }
-  }, [cards, aiConfig]);
-
-  // ============================================================
-  // Stage 5: AI 卡片设计（Stage 4.5 — Vision API 分析图片后设计）
-  // 核心：每张卡片基于图片构图自动生成唯一布局、配色、层次
-  // ============================================================
-  const handleDesignCards = useCallback(async () => {
-    if (cards.length === 0) return;
-    setStage('designing-card');
-    setStatus('AI 正在分析每张图片构图并设计卡片布局...');
-    setErrorMsg('');
-    setDesignProgress({ current: 0, total: cards.length, msg: '开始设计...' });
-
-    try {
-      cardDesignServiceRef.current.updateConfig(aiConfig);
-      const updatedCards = [...cards];
-      const total = cards.length;
-
-      for (let i = 0; i < total; i++) {
-        const card = updatedCards[i];
-        if (!card.imageUrl || card.imageStatus !== 'done') {
-          updatedCards[i] = { ...card, designStatus: 'error', designError: '图片未就绪' };
-          setCards([...updatedCards]);
-          continue;
-        }
-
-        setDesignProgress({ current: i + 1, total, msg: `正在设计第${i + 1}/${total}张卡片...` });
-        setStatus(`正在设计第${i + 1}/${total}张卡片...`);
-
-        try {
-          const design = await cardDesignServiceRef.current.designCard(
-            card.imageUrl,
-            card.knowledge!,
-            card.content!,
-            selectedStylePreset,
-            i,
-            total,
-            (s, sn) => { /* 进度由 designProgress 管理 */ },
-          );
-          console.log(`[App] Card ${i + 1} design done, html length:`, design.html.length);
-          updatedCards[i] = { ...card, design, designStatus: 'done', designError: undefined };
-        } catch (err) {
-          console.warn(`[App] Card ${i + 1} design failed:`, err);
-          updatedCards[i] = { ...card, designStatus: 'error', designError: err instanceof Error ? err.message : '设计失败' };
-        }
-        setCards([...updatedCards]);
-      }
-
-      setStage('review-design');
-      setStatus(`卡片设计完成（${total}张），请审校每张卡片的 AI 设计`);
-      setDesignProgress({ current: 0, total: 0, msg: '' });
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : '卡片设计失败');
-      setStage('review-image');
-      setStatus('');
-      setDesignProgress({ current: 0, total: 0, msg: '' });
-    }
-  }, [cards, aiConfig, selectedStylePreset]);
-
-  // ===== 单张重新设计 =====
-  const handleRegenerateDesign = useCallback(async (cardIndex: number) => {
-    const card = cards[cardIndex];
-    if (!card?.imageUrl) return;
-    setStatus(`正在重新设计第${cardIndex + 1}张卡片...`);
-    setErrorMsg('');
-    try {
-      cardDesignServiceRef.current.updateConfig(aiConfig);
-      const design = await cardDesignServiceRef.current.designCard(
-        card.imageUrl,
-        card.knowledge!,
-        card.content!,
-        selectedStylePreset,
-        cardIndex,
-        cards.length,
-        () => {},
-      );
-      const updatedCards = [...cards];
-      updatedCards[cardIndex] = { ...card, design, designStatus: 'done', designError: undefined };
-      setCards(updatedCards);
-      setStatus('卡片设计重新完成');
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : '卡片设计失败');
-      setStatus('');
-    }
-  }, [cards, aiConfig, selectedStylePreset]);
-
-  // ============================================================
-  // Stage 5: 导出PNG
-  // ============================================================
-  const handleExport = useCallback(async () => {
-    if (!cardRef.current) return;
-    setStatus('正在导出图片...');
-    try {
-      const dataUrl = await ExportService.exportAsPng(cardRef.current, {
-        width: selectedTemplate.canvas.width,
-        height: selectedTemplate.canvas.height,
-        pixelRatio: 2,
-        backgroundColor: selectedTemplate.canvas.backgroundColor,
-      });
-      ExportService.download(dataUrl, `${activeContent.title || '信息图'}-${activeCardIndex + 1}-${Date.now()}.png`);
-      setStatus('导出完成');
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : '导出失败');
-    }
-  }, [selectedTemplate, activeContent, activeCardIndex]);
-
-  // ===== 批量导出进度状态 =====
-  const [exportProgress, setExportProgress] = useState({ current: 0, total: 0, msg: '', active: false });
-
-  /**
-   * 批量导出所有卡片为PNG并逐个下载
-   * 原理：依次切换 activeCardIndex → 等待渲染 → 截图 → 下载
-   */
-  const handleExportBatch = useCallback(async () => {
-    if (cards.length === 0) return;
-    setExportProgress({ current: 0, total: cards.length, msg: '准备批量导出...', active: true });
-    setErrorMsg('');
-    const originalIndex = activeCardIndex;
-
-    try {
-      for (let i = 0; i < cards.length; i++) {
-        setExportProgress({ current: i, total: cards.length, msg: `正在导出第 ${i + 1}/${cards.length} 张...`, active: true });
-        // 切换到目标卡片
-        setActiveCardIndex(i);
-        // 等待 React 重新渲染 + 图片加载
-        await new Promise(r => setTimeout(r, 400));
-
-        if (!cardRef.current) continue;
-        const content = cards[i]?.content || EMPTY_CONTENT;
-        const dataUrl = await ExportService.exportAsPng(cardRef.current, {
-          width: selectedTemplate.canvas.width,
-          height: selectedTemplate.canvas.height,
-          pixelRatio: 2,
-          backgroundColor: selectedTemplate.canvas.backgroundColor,
-        });
-        const filename = `${content.title || '信息图'}-${i + 1}-${Date.now()}.png`;
-        ExportService.download(dataUrl, filename);
-        // 间隔避免浏览器拦截
-        await new Promise(r => setTimeout(r, 250));
-      }
-      setExportProgress({ current: cards.length, total: cards.length, msg: `全部 ${cards.length} 张已导出`, active: false });
-      setStatus(`批量导出完成，共 ${cards.length} 张`);
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : '批量导出失败');
-      setExportProgress({ current: 0, total: 0, msg: '', active: false });
+      showToast('URL 提取失败：' + (err instanceof Error ? err.message : '未知错误'));
     } finally {
-      // 恢复原选中卡片
-      setActiveCardIndex(originalIndex);
+      setBusy(false);
     }
-  }, [cards, selectedTemplate, activeCardIndex]);
-
-  /**
-   * 批量导出所有卡片并打包为ZIP下载
-   */
-  const handleExportZip = useCallback(async () => {
-    if (cards.length === 0) return;
-    setExportProgress({ current: 0, total: cards.length, msg: '准备打包导出...', active: true });
-    setErrorMsg('');
-    const originalIndex = activeCardIndex;
-
-    try {
-      const exportCards: ExportCardParams[] = [];
-
-      // 第一阶段：依次渲染并截图，收集所有 dataUrl
-      for (let i = 0; i < cards.length; i++) {
-        setExportProgress({ current: i, total: cards.length, msg: `正在生成第 ${i + 1}/${cards.length} 张...`, active: true });
-        setActiveCardIndex(i);
-        await new Promise(r => setTimeout(r, 400));
-
-        if (!cardRef.current) continue;
-        const content = cards[i]?.content || EMPTY_CONTENT;
-        const dataUrl = await ExportService.exportAsPng(cardRef.current, {
-          width: selectedTemplate.canvas.width,
-          height: selectedTemplate.canvas.height,
-          pixelRatio: 2,
-          backgroundColor: selectedTemplate.canvas.backgroundColor,
-        });
-        exportCards.push({
-          element: cardRef.current,
-          filename: `${content.title || '信息图'}-${String(i + 1).padStart(2, '0')}.png`,
-          width: selectedTemplate.canvas.width,
-          height: selectedTemplate.canvas.height,
-          pixelRatio: 2,
-          backgroundColor: selectedTemplate.canvas.backgroundColor,
-        });
-        // 把 dataUrl 临时存储（因为 element 会随切换变化，需在切换前提取）
-        // 直接用闭包存储 dataUrl
-        (exportCards[exportCards.length - 1] as any)._dataUrl = dataUrl;
-      }
-
-      // 第二阶段：打包为 ZIP
-      setExportProgress({ current: cards.length, total: cards.length, msg: '正在打包ZIP...', active: true });
-      const zipName = `${topic || '知识卡片'}-${new Date().toISOString().slice(0, 10)}`;
-      const { default: JSZip } = await import('jszip');
-      const zip = new JSZip();
-      const folder = zip.folder(zipName) || zip;
-
-      for (const card of exportCards) {
-        const dataUrl = (card as any)._dataUrl as string;
-        const base64 = dataUrl.substring(dataUrl.indexOf(',') + 1);
-        folder.file(card.filename, base64, { base64: true });
-      }
-
-      const zipBlob = await zip.generateAsync({
-        type: 'blob',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 6 },
-      });
-
-      const zipUrl = URL.createObjectURL(zipBlob);
-      const link = document.createElement('a');
-      link.download = `${zipName}.zip`;
-      link.href = zipUrl;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      setTimeout(() => URL.revokeObjectURL(zipUrl), 10000);
-
-      setExportProgress({ current: cards.length, total: cards.length, msg: `ZIP打包完成，共 ${cards.length} 张`, active: false });
-      setStatus(`ZIP打包完成，共 ${cards.length} 张`);
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'ZIP打包失败');
-      setExportProgress({ current: 0, total: 0, msg: '', active: false });
-    } finally {
-      setActiveCardIndex(originalIndex);
-    }
-  }, [cards, selectedTemplate, activeCardIndex, topic]);
-
-  // ============================================================
-  // 项目保存/加载
-  // ============================================================
-  const handleSaveProject = useCallback(() => {
-    if (!knowledge || cards.length === 0) return;
-    const project = ProjectService.createProject(topic, selectedTemplate.id, selectedStylePreset.id, cards);
-    ProjectService.save(project);
-    setStatus('项目已保存');
-  }, [topic, selectedTemplate, selectedStylePreset, knowledge, cards]);
-
-  const handleLoadProject = useCallback(() => {
-    const project = ProjectService.load();
-    if (!project) { setErrorMsg('未找到已保存的项目'); return; }
-    const tpl = getTemplateById(project.templateId);
-    if (tpl) setSelectedTemplate(tpl);
-    const sp = stylePresets.find(s => s.id === project.stylePresetId);
-    if (sp) setSelectedStylePreset(sp);
-    setTopic(project.topic);
-    setCards(project.cards);
-    if (project.cards[0]?.knowledge) setKnowledge(project.cards[0].knowledge);
-    setActiveCardIndex(0);
-    // 根据已有数据跳到合适阶段
-    if (project.cards.every(c => c.imageUrl)) setStage('review-image');
-    else if (project.cards.every(c => c.prompt)) setStage('review-prompt');
-    else if (project.cards.every(c => c.content)) setStage('review-content');
-    else if (project.cards[0]?.knowledge) setStage('review-knowledge');
-    setStatus('项目已加载');
-  }, []);
-
-  const handleExportProject = useCallback(() => {
-    if (cards.length === 0) return;
-    const project = ProjectService.createProject(topic, selectedTemplate.id, selectedStylePreset.id, cards);
-    ProjectService.downloadJSON(project);
-    setStatus('项目JSON已下载');
-  }, [topic, selectedTemplate, selectedStylePreset, cards]);
-
-  // ===== 返回输入页（保留已生成数据） =====
-  const handleBackToInput = useCallback(() => {
-    setStage('input');
-    setStatus('');
-    setErrorMsg('');
-    // 不清除 knowledge、cards 等数据，用户可修改模板/风格后继续
-  }, []);
-
-  // ===== 完全重新开始（清除所有数据） =====
-  const handleClearAll = useCallback(() => {
-    setStage('input');
-    setTopic('');
-    setKnowledge(null);
-    setCards([]);
-    setActiveCardIndex(0);
-    setStatus('');
-    setErrorMsg('');
-  }, []);
-
-  // ===== 更新当前卡片内容 =====
-  const updateActiveCardContent = useCallback((content: CardContent) => {
-    setCards(prev => prev.map((c, i) => i === activeCardIndex ? { ...c, content } : c));
-  }, [activeCardIndex]);
-
-  // ===== 更新当前卡片Prompt =====
-  const updateActiveCardPrompt = useCallback((prompt: VisualPrompt) => {
-    setCards(prev => prev.map((c, i) => i === activeCardIndex ? { ...c, prompt } : c));
-  }, [activeCardIndex]);
-
-  // ===== 渲染卡片 =====
-  const renderCard = () => {
-    if (activeCard && activeCard.design && activeCard.designStatus === 'done') {
-      // AI 设计已就绪：使用自适应渲染器（尺寸由组件内部处理）
-      return <AdaptiveCardRenderer card={activeCard} stylePreset={selectedStylePreset} cardIndex={activeCardIndex} cardTotal={cards.length} innerRef={cardRef} />;
-    }
-    // Fallback: 旧版渲染器（图片未设计时）
-    const content = activeContent;
-    const imageUrl = activeImageUrl;
-    const tpl = selectedTemplate;
-    if (tpl.renderer === 'knowledge' || tpl.renderer === 'lifecycle' || tpl.renderer === 'timeline' || tpl.renderer === 'process') {
-      return <KnowledgeCardRenderer template={tpl} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} stylePreset={selectedStylePreset} cardIndex={activeCardIndex} />;
-    }
-    if (tpl.renderer === 'html') {
-      return <RichCardRenderer template={tpl} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />;
-    }
-    return <CardRenderer template={tpl} content={content} imageUrl={imageUrl} scale={previewScale} innerRef={cardRef} />;
   };
-
-  // ===== 输入框组件 =====
-  const Field: React.FC<{ label: string; value: string; onChange: (v: string) => void; placeholder?: string; multiline?: boolean }> =
-    ({ label, value, onChange, placeholder, multiline }) => (
-      <div className="mb-3">
-        <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
-        {multiline ? (
-          <textarea className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent transition resize-y" rows={3}
-            value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
-        ) : (
-          <input type="text" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent transition"
-            value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
-        )}
-      </div>
-    );
-
-  // ===== 步骤指示器 =====
-  const StepIndicator: React.FC = () => {
-    const num = currentStageNum();
-    return (
-      <div className="flex items-center gap-1 mb-4">
-        {STAGES.map((s, i) => (
-          <React.Fragment key={s.num}>
-            <div className={`flex items-center gap-1.5 ${s.num <= num ? 'text-amber-600' : 'text-gray-400'}`}>
-              <span className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${
-                s.num < num ? 'bg-amber-500 text-white' : s.num === num ? 'bg-amber-100 text-amber-600 border-2 border-amber-500' : 'bg-gray-100'
-              }`}>
-                {s.num < num ? '✓' : s.num}
-              </span>
-              <span className="text-xs font-medium hidden md:inline">{s.label}</span>
-            </div>
-            {i < STAGES.length - 1 && <div className={`flex-1 h-0.5 mx-1 ${s.num < num ? 'bg-amber-500' : 'bg-gray-200'}`} />}
-          </React.Fragment>
-        ))}
-      </div>
-    );
-  };
-
-  // ===== 卡片选择器（系列模板） =====
-  const CardSelector: React.FC = () => {
-    if (!isSeries || cards.length === 0) return null;
-    return (
-      <div className="flex items-center gap-1.5 mb-3 flex-wrap">
-        {cards.map((c, i) => (
-          <button key={c.id} onClick={() => setActiveCardIndex(i)}
-            className={`px-2.5 py-1 text-xs rounded-full transition ${
-              i === activeCardIndex ? 'bg-amber-500 text-white' : 'bg-gray-100 hover:bg-amber-100 text-gray-600'
-            }`}>
-            {String(i + 1).padStart(2, '0')} {c.stage?.slice(0, 6)}
-          </button>
-        ))}
-      </div>
-    );
-  };
-
-  // ===== 生成中遮罩 =====
-  const isGenerating = stage.startsWith('generating-');
 
   return (
-    <div className="flex h-screen overflow-hidden bg-gray-100">
-      {/* ====== 左侧控制面板 ====== */}
-      <aside className="w-[540px] flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden">
-        {/* 顶部标题 */}
-        <div className="px-5 py-3.5 border-b border-gray-200 bg-gradient-to-r from-amber-50 to-orange-50">
-          <div className="flex items-center justify-between">
-            <h1 className="text-lg font-bold text-gray-800 flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
-              AI信息图工作室
-            </h1>
-            <div className="flex items-center gap-1.5">
-              <button onClick={handleSaveProject} disabled={cards.length === 0}
-                className="text-xs px-2 py-1 text-gray-500 hover:text-amber-600 disabled:opacity-30" title="保存项目">💾</button>
-              <button onClick={handleLoadProject}
-                className="text-xs px-2 py-1 text-gray-500 hover:text-amber-600" title="加载项目">📂</button>
-              <button onClick={handleExportProject} disabled={cards.length === 0}
-                className="text-xs px-2 py-1 text-gray-500 hover:text-amber-600 disabled:opacity-30" title="导出JSON">📤</button>
-            </div>
+    <div style={S.page}>
+      {/* 顶部导航 */}
+      <nav style={S.nav} className="fade-in">
+        <div style={S.navLeft}>
+          <div style={S.logoIcon}>✦</div>
+          <div style={S.logoText}>
+            <span style={S.logoTitle}>提示词工坊</span>
+            <span style={S.logoSub}>Knowledge Card Prompt Workshop</span>
           </div>
-          <p className="text-xs text-gray-500 mt-0.5">五阶段全链路：知识检索 → 内容生成 → Prompt → 出图 → 排版</p>
         </div>
-
-        {/* 步骤指示器 */}
-        {stage !== 'input' && (
-          <div className="px-5 pt-4">
-            <StepIndicator />
-          </div>
-        )}
-
-        {/* 可滚动内容区 */}
-        <div className="flex-1 overflow-y-auto px-5 pb-4">
-          {/* ===== 输入阶段 ===== */}
-          {stage === 'input' && (
-            <section>
-              {/* 已有数据提示栏 */}
-              {knowledge && cards.length > 0 && (
-                <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-sm">📋</span>
-                    <span className="text-xs font-medium text-green-700">已有项目数据：{topic}（{cards.length}张卡片）</span>
-                  </div>
-                  <p className="text-[11px] text-green-600 mb-2">
-                    已生成：{knowledge.facts.length > 0 ? '知识库' : ''} {cards[0]?.content ? '· 内容' : ''} {cards[0]?.prompt ? '· Prompt' : ''} {cards[0]?.imageUrl ? '· 图片' : ''}
-                  </p>
-                  <div className="flex gap-2">
-                    {cards[0]?.imageUrl ? (
-                      <button onClick={() => setStage('review-image')}
-                        className="flex-1 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 transition">继续排版导出 →</button>
-                    ) : cards[0]?.prompt ? (
-                      <button onClick={() => setStage('review-prompt')}
-                        className="flex-1 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 transition">继续生成图片 →</button>
-                    ) : cards[0]?.content ? (
-                      <button onClick={() => setStage('review-content')}
-                        className="flex-1 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 transition">继续生成Prompt →</button>
-                    ) : (
-                      <button onClick={() => setStage('review-knowledge')}
-                        className="flex-1 py-1.5 text-xs bg-green-600 text-white rounded-lg hover:bg-green-700 transition">继续生成内容 →</button>
-                    )}
-                    <button onClick={handleClearAll}
-                      className="px-3 py-1.5 text-xs text-red-500 border border-red-200 rounded-lg hover:bg-red-50 transition">清空重来</button>
-                  </div>
-                  <p className="text-[10px] text-gray-400 mt-1.5">可修改模板/风格后点击下方"开始知识检索"重新生成</p>
-                </div>
-              )}
-
-              <h2 className="text-sm font-semibold text-gray-700 mb-3">{knowledge && cards.length > 0 ? '修改设置' : '输入主题'}</h2>
-              <div className="mb-3">
-                <input type="text" className="w-full px-3 py-2.5 border-2 border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-amber-500 focus:border-transparent transition"
-                  value={topic} onChange={(e) => setTopic(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleStart()}
-                  placeholder="输入主题，如：夜鹭、王安石变法、造纸术..." />
-                <p className="text-xs text-gray-400 mt-1.5">AI将自动检索知识、生成内容、构建Prompt、生成图片</p>
-              </div>
-
-              {/* 快捷主题 */}
-              <div className="mb-4">
-                <p className="text-xs text-gray-500 mb-2">试试这些主题：</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {['夜鹭', '向日葵', '大熊猫', '王安石变法', '丝绸之路', '造纸术', '立春', '敦煌', '人工智能', '量子计算'].map(t => (
-                    <button key={t} onClick={() => setTopic(t)}
-                      className="px-2.5 py-1 text-xs bg-gray-100 hover:bg-amber-100 hover:text-amber-700 rounded-full transition">{t}</button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 模板选择 */}
-              <h2 className="text-sm font-semibold text-gray-700 mb-2 mt-4">选择模板</h2>
-              <div className="space-y-1.5 mb-4">
-                {templates.map(tpl => (
-                  <button key={tpl.id} onClick={() => setSelectedTemplate(tpl)}
-                    className={`w-full text-left px-3 py-2 rounded-lg border-2 transition ${
-                      selectedTemplate.id === tpl.id ? 'border-amber-500 bg-amber-50' : 'border-gray-200 hover:border-gray-300'
-                    }`}>
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-sm text-gray-800">{tpl.name}</span>
-                      <div className="flex items-center gap-1">
-                        {tpl.cardCount && tpl.cardCount > 1 && <span className="text-[10px] text-blue-500">{tpl.cardCount}张</span>}
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-                          ['lifecycle','timeline','process'].includes(tpl.category) ? 'bg-purple-100 text-purple-700' :
-                          ['quick','encyclopedia','compare'].includes(tpl.category) ? 'bg-teal-100 text-teal-700' :
-                          'bg-gray-100 text-gray-600'
-                        }`}>{tpl.category}</span>
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-
-              {/* 风格预设 */}
-              <h2 className="text-sm font-semibold text-gray-700 mb-2 mt-4">选择风格</h2>
-              <div className="grid grid-cols-2 gap-2 mb-4">
-                {stylePresets.map(sp => (
-                  <button key={sp.id} onClick={() => setSelectedStylePreset(sp)}
-                    className={`px-3 py-2 rounded-lg border-2 text-left transition ${
-                      selectedStylePreset.id === sp.id ? 'border-amber-500 bg-amber-50' : 'border-gray-200 hover:border-gray-300'
-                    }`}>
-                    <div className="flex items-center gap-1.5 mb-1">
-                      <span className="w-3 h-3 rounded-full" style={{ background: sp.palette[0] }} />
-                      <span className="text-xs font-medium text-gray-700">{sp.name}</span>
-                    </div>
-                    <p className="text-[10px] text-gray-400">{sp.nameEn}</p>
-                  </button>
-                ))}
-              </div>
-
-              {/* AI配置 — 仅展示模型信息，API Key 由服务端持有 */}
-              <details className="mb-3">
-                <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">⚙️ AI模型配置</summary>
-                <div className="mt-2 p-3 bg-gray-50 rounded-lg space-y-2">
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="block text-xs text-gray-500 mb-1">文本模型</label>
-                      <input type="text" className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs"
-                        value={aiConfig.textModel} onChange={e => setAiConfig({ ...aiConfig, textModel: e.target.value })} />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-500 mb-1">图片模型</label>
-                      <input type="text" className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs"
-                        value={aiConfig.imageModel} onChange={e => setAiConfig({ ...aiConfig, imageModel: e.target.value })} />
-                    </div>
-                  </div>
-                  <p className="text-[10px] text-gray-400">
-                    API Key 由服务端代理配置，前端不暴露密钥
-                  </p>
-                </div>
-              </details>
-
-              <button onClick={handleStart} disabled={!topic.trim()}
-                className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition disabled:opacity-50 flex items-center justify-center gap-2">
-                <span>🔍</span> 开始知识检索
-              </button>
-            </section>
+        <div style={S.navRight}>
+          {useMock && <span style={S.mockBadge}>MOCK</span>}
+          {step !== 'study' && studyCards.length > 0 && (
+            <button
+              style={S.studyBtn}
+              onClick={() => { prevStepRef.current = step; setStudyScope(undefined); setStep('study'); }}
+              title="复习全部到期卡片（逾期最久优先）"
+            >
+              📚 复习{dueCount > 0 ? (
+                <span style={{
+                  marginLeft: 6, background: 'var(--error)', color: '#fff',
+                  borderRadius: 999, padding: '1px 7px', fontSize: 11, fontWeight: 700,
+                }}>{dueCount}</span>
+              ) : ' ✓'}
+            </button>
           )}
-
-          {/* ===== Stage 1: 知识检索审校 ===== */}
-          {(stage === 'review-knowledge' || stage === 'generating-content') && knowledge && (
-            <section>
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-gray-700">阶段1：知识检索结果</h2>
-                <button onClick={handleBackToInput} className="text-xs text-gray-400 hover:text-gray-600">← 重新输入</button>
-              </div>
-
-              <div className="mb-3 p-3 bg-blue-50 rounded-lg">
-                <p className="text-sm font-medium text-gray-800">{knowledge.topic}</p>
-                <p className="text-xs text-gray-500 mt-1">{knowledge.summary}</p>
-                <div className="flex flex-wrap gap-1 mt-2">
-                  {knowledge.tags.map(t => <span key={t} className="text-[10px] px-2 py-0.5 bg-blue-100 text-blue-600 rounded-full">{t}</span>)}
-                </div>
-              </div>
-
-              {knowledge.facts.length > 0 && (
-                <div className="mb-3">
-                  <label className="text-xs font-medium text-gray-600 mb-1.5 block">关键事实</label>
-                  <div className="space-y-1">
-                    {knowledge.facts.map((f, i) => (
-                      <div key={i} className="flex items-center gap-2 p-2 bg-gray-50 rounded">
-                        <span className="text-xs text-gray-500 w-20 flex-shrink-0">{f.label}</span>
-                        <input type="text" className="flex-1 px-2 py-1 border border-gray-200 rounded text-xs"
-                          value={f.value} onChange={e => {
-                            const facts = [...knowledge.facts];
-                            facts[i] = { ...f, value: e.target.value };
-                            setKnowledge({ ...knowledge, facts });
-                          }} />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {knowledge.keyPoints.length > 0 && (
-                <div className="mb-3">
-                  <label className="text-xs font-medium text-gray-600 mb-1.5 block">核心要点</label>
-                  {knowledge.keyPoints.map((p, i) => (
-                    <input key={i} type="text" className="w-full px-2 py-1.5 mb-1 border border-gray-200 rounded text-xs"
-                      value={p} onChange={e => {
-                        const keyPoints = [...knowledge.keyPoints];
-                        keyPoints[i] = e.target.value;
-                        setKnowledge({ ...knowledge, keyPoints });
-                      }} />
-                  ))}
-                </div>
-              )}
-
-              {knowledge.lifecycleStages && knowledge.lifecycleStages.length > 0 && (
-                <div className="mb-3">
-                  <label className="text-xs font-medium text-gray-600 mb-1.5 block">生命周期阶段（{knowledge.lifecycleStages.length}个）</label>
-                  <div className="space-y-1.5">
-                    {knowledge.lifecycleStages.map((s, i) => (
-                      <div key={s.id} className="p-2 bg-gray-50 rounded">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-xs font-medium text-amber-600">{String(i + 1).padStart(2, '0')}</span>
-                          <span className="text-xs text-gray-700">{s.name} · {s.period}</span>
-                        </div>
-                        <p className="text-[11px] text-gray-500">{s.description}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {knowledge.timelineEvents && knowledge.timelineEvents.length > 0 && (
-                <div className="mb-3">
-                  <label className="text-xs font-medium text-gray-600 mb-1.5 block">时间线事件（{knowledge.timelineEvents.length}个）</label>
-                  <div className="space-y-1.5">
-                    {knowledge.timelineEvents.map((e, i) => (
-                      <div key={e.id} className="p-2 bg-gray-50 rounded">
-                        <span className="text-xs font-medium text-amber-600">{e.year}</span>
-                        <span className="text-xs text-gray-700 ml-2">{e.title}</span>
-                        <p className="text-[11px] text-gray-500 mt-0.5">{e.description}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <button onClick={handleGenerateContent} disabled={stage === 'generating-content'}
-                className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition disabled:opacity-50 flex items-center justify-center gap-2">
-                {stage === 'generating-content' ? <><Spinner /> 生成中...</> : <><span>✍️</span> 生成卡片内容</>}
+          <button style={S.iconBtn} onClick={() => { if (step !== 'admin') prevStepRef.current = step; setStep('admin'); }} title="后台管理">
+            ⚙️
+          </button>
+          <button style={S.iconBtn} onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} title="切换主题">
+            {theme === 'dark' ? '☀️' : '🌙'}
+          </button>
+          {step === 'prompts' && (
+            <>
+              <button style={S.studyBtn} onClick={() => setStep('quiz')}>
+                📝 测验
               </button>
-            </section>
+              <button style={S.studyBtn} onClick={() => setStep('export')}>
+                📦 批量导出
+              </button>
+            </>
           )}
+        </div>
+      </nav>
 
-          {/* ===== Stage 2: 内容审校 ===== */}
-          {(stage === 'review-content' || stage === 'generating-prompt') && activeCard && (
-            <section>
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-gray-700">阶段2：内容审校</h2>
-                <button onClick={() => setStage('review-knowledge')} className="text-xs text-gray-400 hover:text-gray-600">← 知识</button>
+      {/* 步骤指示器（后台管理页不显示） */}
+      {step !== 'admin' && (
+      <div style={S.stepBar} className="fade-in">
+        <StepDot active={step === 'input'} done={step === 'prompts' || step === 'study' || step === 'quiz' || step === 'export'} num={1} label="输入" />
+        <div style={{ ...S.stepLine, ...(step !== 'input' ? S.stepLineActive : {}) }} />
+        <StepDot active={step === 'prompts'} done={step === 'study' || step === 'quiz' || step === 'export'} num={2} label="提示词" />
+        <div style={{ ...S.stepLine, ...(step === 'study' || step === 'quiz' || step === 'export' ? S.stepLineActive : {}) }} />
+        <StepDot active={step === 'study'} done={step === 'quiz' || step === 'export'} num={3} label="复习" />
+        <div style={{ ...S.stepLine, ...(step === 'quiz' || step === 'export' ? S.stepLineActive : {}) }} />
+        <StepDot active={step === 'quiz'} done={step === 'export'} num={4} label="测验" />
+        <div style={{ ...S.stepLine, ...(step === 'export' ? S.stepLineActive : {}) }} />
+        <StepDot active={step === 'export'} done={false} num={5} label="导出" />
+      </div>
+      )}
+
+      {/* 主内容区：错误边界兜底——任何子视图渲染抛错都给出可恢复出口，而不是整树卸载逼用户手动刷新 */}
+      <main style={S.main}>
+        <StepErrorBoundary stepKey={step} onEscape={() => { setStep('input'); setStudyScope(undefined); }}>
+        {step === 'input' && (
+          <div style={S.card} className="fade-in">
+            <div style={S.cardHead}>
+              <span style={S.kicker}>第一步</span>
+              <h2 style={S.h2}>输入知识内容</h2>
+              <p style={S.h2desc}>输入主题、粘贴文本、上传文件或 URL，AI 自动拆解为结构化模块并生成闪卡</p>
+            </div>
+
+            {/* 输入方式切换 */}
+            <div style={S.inputTypeSwitch}>
+              <button
+                style={{ ...S.inputTypeBtn, ...(inputType === 'text' ? S.inputTypeBtnActive : {}) }}
+                onClick={() => setInputType('text')}
+              >
+                ✏️ 手动输入
+              </button>
+              <button
+                style={{ ...S.inputTypeBtn, ...(inputType === 'file' ? S.inputTypeBtnActive : {}) }}
+                onClick={() => setInputType('file')}
+              >
+                📁 上传文件
+              </button>
+              <button
+                style={{ ...S.inputTypeBtn, ...(inputType === 'url' ? S.inputTypeBtnActive : {}) }}
+                onClick={() => setInputType('url')}
+              >
+                🔗 URL 提取
+              </button>
+            </div>
+
+            {/* 手动输入 */}
+            {inputType === 'text' && (
+              <div style={S.field}>
+                <label style={S.label}>主题或文本</label>
+                <textarea
+                  style={S.textarea}
+                  placeholder="例如：HTTP1.1 vs HTTP2 / 504网关超时 / 光合作用原理…"
+                  value={input}
+                  onChange={(e) => { setInput(e.target.value); setGenError(''); }}
+                  rows={6}
+                />
               </div>
+            )}
 
-              <CardSelector />
-
-              <Field label="主标题" value={activeContent.title} onChange={v => updateActiveCardContent({ ...activeContent, title: v })} />
-              <Field label="副标题" value={activeContent.subtitle} onChange={v => updateActiveCardContent({ ...activeContent, subtitle: v })} />
-              <Field label="正文" value={activeContent.body} onChange={v => updateActiveCardContent({ ...activeContent, body: v })} multiline />
-              <Field label="底部信息" value={activeContent.footer} onChange={v => updateActiveCardContent({ ...activeContent, footer: v })} />
-
-              {/* 知识模块编辑 */}
-              {activeContent.modules && activeContent.modules.length > 0 && (
-                <div className="mb-3">
-                  <label className="text-xs font-medium text-gray-600 mb-1.5 block">知识模块（{activeContent.modules.length}个）</label>
-                  {activeContent.modules.map((mod, i) => (
-                    <div key={mod.id} className="mb-2 p-2 bg-gray-50 rounded-lg border border-gray-200">
-                      <div className="flex items-center gap-2 mb-1.5">
-                        <input type="text" className="w-10 px-1 py-1 border border-gray-300 rounded text-xs text-center"
-                          value={mod.icon || ''} onChange={e => {
-                            const modules = [...(activeContent.modules || [])];
-                            modules[i] = { ...mod, icon: e.target.value };
-                            updateActiveCardContent({ ...activeContent, modules });
-                          }} />
-                        <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
-                          value={mod.title} onChange={e => {
-                            const modules = [...(activeContent.modules || [])];
-                            modules[i] = { ...mod, title: e.target.value };
-                            updateActiveCardContent({ ...activeContent, modules });
-                          }} />
-                      </div>
-                      {mod.bullets && mod.bullets.length > 0 ? (
-                        <div className="space-y-1">
-                          {mod.bullets.map((b, j) => (
-                            <div key={j} className="flex items-center gap-1">
-                              <span className="text-xs text-gray-400">•</span>
-                              <input type="text" className="flex-1 px-2 py-1 border border-gray-300 rounded text-xs"
-                                value={b} onChange={e => {
-                                  const modules = [...(activeContent.modules || [])];
-                                  const bullets = [...(mod.bullets || [])];
-                                  bullets[j] = e.target.value;
-                                  modules[i] = { ...mod, bullets };
-                                  updateActiveCardContent({ ...activeContent, modules });
-                                }} />
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <textarea className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs resize-y" rows={2}
-                          value={mod.content} onChange={e => {
-                            const modules = [...(activeContent.modules || [])];
-                            modules[i] = { ...mod, content: e.target.value };
-                            updateActiveCardContent({ ...activeContent, modules });
-                          }} />
-                      )}
+            {/* 文件上传 */}
+            {inputType === 'file' && (
+              <div style={S.field}>
+                <label style={S.label}>选择文件（PDF / Markdown / TXT）</label>
+                <div style={S.fileDropZone} onClick={() => fileInputRef.current?.click()}>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf,.md,.markdown,.txt"
+                    style={{ display: 'none' }}
+                    onChange={handleFileUpload}
+                  />
+                  <div style={S.fileIcon}>📄</div>
+                  <div style={S.fileText}>
+                    <div style={S.fileTitle}>点击选择文件或拖拽到此处</div>
+                    <div style={S.fileHint}>支持 PDF、Markdown、纯文本</div>
+                  </div>
+                </div>
+                {loadedFile && (
+                  <div style={S.loadedCard}>
+                    <div style={S.loadedHeader}>
+                      <span style={S.loadedTitle}>✓ 已加载：{loadedFile.name}</span>
+                      <span style={S.loadedMeta}>
+                        {loadedFile.chars} 字{loadedFile.truncated ? ` · 已截断` : ''}
+                      </span>
                     </div>
-                  ))}
-                </div>
-              )}
-
-              {activeContent.quote && (
-                <Field label="金句" value={activeContent.quote} onChange={v => updateActiveCardContent({ ...activeContent, quote: v })} multiline />
-              )}
-
-              <button onClick={handleGeneratePrompts} disabled={stage === 'generating-prompt'}
-                className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition disabled:opacity-50 flex items-center justify-center gap-2">
-                {stage === 'generating-prompt' ? <><Spinner /> 生成中...</> : <><span>🎨</span> 生成Prompt</>}
-              </button>
-            </section>
-          )}
-
-          {/* ===== Stage 3: Prompt审校 ===== */}
-          {(stage === 'review-prompt' || stage === 'generating-image') && activeCard?.prompt && (
-            <section>
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-gray-700">阶段3：Prompt审校</h2>
-                <button onClick={() => setStage('review-content')} className="text-xs text-gray-400 hover:text-gray-600">← 内容</button>
-              </div>
-
-              <CardSelector />
-
-              {/* AI 改写说明横幅 */}
-              <div className="mb-2 p-2 bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-200 rounded-lg">
-                <div className="flex items-center gap-1.5 mb-0.5">
-                  <span className="text-xs">✨</span>
-                  <span className="text-[11px] font-semibold text-violet-700">AI 已根据当前阶段内容改写 Prompt</span>
-                </div>
-                <p className="text-[10px] text-violet-600 leading-relaxed">
-                  辅助元素已按阶段智能调整（成虫里不会再出现蛋），主视觉描述贴合当前阶段特征。如不满意可手动调整下方字段。
-                </p>
-              </div>
-
-              {/* 当前阶段信息卡 */}
-              <div className="mb-2 p-2 bg-amber-50 border-l-3 border-amber-400 rounded-r-lg">
-                <div className="flex items-center gap-1.5 mb-1">
-                  <span className="text-xs">🎯</span>
-                  <span className="text-[11px] font-semibold text-amber-700">当前阶段</span>
-                </div>
-                <p className="text-xs text-amber-900 font-medium">{activeCard.stage}</p>
-                {activeCard.subtitle && (
-                  <p className="text-[10px] text-amber-700 mt-0.5">{activeCard.subtitle}</p>
+                    <div style={S.loadedPreview}>{loadedFile.preview}{loadedFile.truncated ? ' …' : ''}</div>
+                  </div>
                 )}
               </div>
+            )}
 
-              {/* 六段式Prompt编辑 —— 主视觉与辅助元素高亮 */}
-              {([
-                ['style', '1. 画面基调', false],
-                ['layout', '2. 布局骨架', false],
-                ['mainVisual', '3. 主视觉插画 ✨AI改写', true],
-                ['auxiliary', '4. 辅助插画 ✨AI改写', true],
-                ['whitespace', '5. 留白区定义', false],
-                ['decoration', '6. 装饰收尾', false],
-              ] as const).map(([key, label, isAI]) => (
-                <div key={key} className={isAI ? 'mb-2 p-2 bg-violet-50/50 border border-violet-200 rounded-lg' : 'mb-2'}>
-                  <Field
-                    label={label}
-                    value={activeCard.prompt![key]}
-                    multiline
-                    onChange={v => updateActiveCardPrompt({ ...activeCard.prompt!, [key]: v })}
+            {/* URL 提取 */}
+            {inputType === 'url' && (
+              <div style={S.field}>
+                <label style={S.label}>网页 URL</label>
+                <div style={S.urlRow}>
+                  <input
+                    style={S.urlInput}
+                    placeholder="https://example.com/article"
+                    value={input}
+                    onChange={(e) => { setInput(e.target.value); setGenError(''); }}
                   />
+                  <button style={S.urlBtn} onClick={handleURLSubmit} disabled={busy}>
+                    提取
+                  </button>
                 </div>
-              ))}
-
-              <div className="mb-3">
-                <label className="block text-xs font-medium text-gray-600 mb-1">负面提示词</label>
-                <p className="text-xs text-gray-500 p-2 bg-gray-50 rounded break-all">{activeCard.prompt.negative}</p>
               </div>
+            )}
 
-              {/* 完整Prompt预览 */}
-              <details className="mb-3">
-                <summary className="text-xs text-gray-500 cursor-pointer">查看完整Prompt</summary>
-                <pre className="mt-1 p-2 bg-gray-900 text-green-400 text-[10px] rounded overflow-x-auto whitespace-pre-wrap">
-                  {PromptBuilder.toPromptString(activeCard.prompt)}
-                </pre>
-              </details>
-
-              <button onClick={handleGenerateImages} disabled={stage === 'generating-image'}
-                className="w-full py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition disabled:opacity-50 flex items-center justify-center gap-2">
-                {stage === 'generating-image' ? <><Spinner /> {imageProgress.msg || '生成中...'}</> : <><span>🖼️</span> 生成AI图片 ({cards.length}张)</>}
-              </button>
-
-              {imageProgress.total > 0 && stage === 'generating-image' && (
-                <div className="mt-2">
-                  <div className="w-full bg-gray-200 rounded-full h-1.5">
-                    <div className="bg-amber-500 h-1.5 rounded-full transition-all"
-                      style={{ width: `${(imageProgress.current / imageProgress.total) * 100}%` }} />
+            {/* AI 推荐 */}
+            {rec && (
+              <div style={userOverride ? S.recDim : S.recBox}>
+                <div style={S.recIcon}>✨</div>
+                <div style={{ flex: 1 }}>
+                  <div style={S.recTitle}>
+                    AI 推荐风格：<b>{STYLE_PRESETS.find(p => p.id === rec.presetId)?.label}</b>
                   </div>
-                  <p className="text-[10px] text-gray-400 mt-1 text-center">{imageProgress.current}/{imageProgress.total}</p>
+                  <div style={S.recReason}>{rec.reason}</div>
                 </div>
-              )}
-            </section>
-          )}
-
-          {/* ===== Stage 4: 图片审校 ===== */}
-          {(stage === 'review-image' || stage === 'designing-card' || stage === 'review-design') && activeCard && (
-            <section>
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-gray-700">
-                  {stage === 'review-image' ? '阶段4：图片审校' : stage === 'designing-card' ? '阶段4.5：AI卡片设计' : '阶段4.5：审校设计'}
-                </h2>
-                <button onClick={() => setStage('review-prompt')} className="text-xs text-gray-400 hover:text-gray-600">← Prompt</button>
+                {!userOverride ? (
+                  <span style={S.recOk}>✓ 已应用</span>
+                ) : (
+                  <button style={S.recBtn} onClick={() => setStylePresetId(rec.presetId)}>采用</button>
+                )}
               </div>
+            )}
 
-              <CardSelector />
+            <div style={S.field}>
+              <label style={S.label}>视觉风格</label>
+              <div style={S.chipWrap}>
+                {STYLE_PRESETS.map((p) => (
+                  <button
+                    key={p.id}
+                    style={{ ...S.chip, ...(stylePresetId === p.id ? S.chipActive : {}) }}
+                    onClick={() => setStylePresetId(p.id)}
+                  >
+                    {p.label}
+                    {rec?.presetId === p.id && <span style={S.chipStar}> ✦</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-              {/* 图片生成状态 */}
-              {stage === 'review-image' && (
-                <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded-lg">
-                  <p className="text-sm text-green-700 font-medium">✓ 图片已生成</p>
-                  {isSeries && <p className="text-xs text-green-600 mt-1">共{cards.length}张，当前第{activeCardIndex + 1}张</p>}
+            {/* 选项行 */}
+            <div style={S.optsRow}>
+              <OptCard title="AI 调用模式">
+                <div style={S.seg}>
+                  <button style={{ ...S.segBtn, ...(!useMock ? S.segOn : {}) }} onClick={() => saveRuntimeSettings({ mock: false })}>
+                    真实调用
+                  </button>
+                  <button style={{ ...S.segBtn, ...(useMock ? S.segOn : {}) }} onClick={() => saveRuntimeSettings({ mock: true })}>
+                    占位预览
+                  </button>
                 </div>
-              )}
+              </OptCard>
+              <OptCard title="输出选项">
+                <label style={S.checkRow}>
+                  <input
+                    type="checkbox"
+                    checked={showPageNumber}
+                    onChange={(e) => applyBadge({ on: e.target.checked, pos: pageBadgePos, fmt: pageBadgeFormat })}
+                    style={S.check}
+                  />
+                  <span style={S.checkLabel}>在图上标注页码编号</span>
+                </label>
+                {showPageNumber && (
+                  <div style={S.badgeOptsRow}>
+                    <select
+                      style={S.miniSelect}
+                      value={pageBadgePos}
+                      onChange={(e) => applyBadge({ on: true, pos: e.target.value as PageBadgePos, fmt: pageBadgeFormat })}
+                      title="页码位置"
+                    >
+                      <option value="tl">左上角</option>
+                      <option value="tc">上边缘正中</option>
+                      <option value="tr">右上角</option>
+                      <option value="bl">左下角</option>
+                      <option value="bc">下边缘正中</option>
+                      <option value="br">右下角</option>
+                    </select>
+                    <select
+                      style={S.miniSelect}
+                      value={pageBadgeFormat}
+                      onChange={(e) => applyBadge({ on: true, pos: pageBadgePos, fmt: e.target.value as PageBadgeFormat })}
+                      title="页码格式"
+                    >
+                      <option value="cn">第 X / N 页</option>
+                      <option value="slash">X / N</option>
+                      <option value="dot">X · N</option>
+                    </select>
+                  </div>
+                )}
+              </OptCard>
+            </div>
 
-              {/* 设计进度 */}
-              {(stage === 'designing-card' || stage === 'review-design') && (
-                <div className="mb-3 p-3 bg-purple-50 border border-purple-200 rounded-lg">
-                  <p className="text-sm text-purple-700 font-medium">
-                    {designProgress.total > 0
-                      ? `✨ 正在设计 (${designProgress.current}/${designProgress.total})`
-                      : '✨ AI 卡片设计完成'}
-                  </p>
-                  {designProgress.msg && <p className="text-xs text-purple-500 mt-1">{designProgress.msg}</p>}
-                  {designProgress.total > 0 && stage === 'designing-card' && (
-                    <div className="mt-2">
-                      <div className="w-full bg-purple-200 rounded-full h-1.5">
-                        <div className="bg-purple-500 h-1.5 rounded-full transition-all"
-                          style={{ width: `${(designProgress.current / designProgress.total) * 100}%` }} />
+            <button
+              style={{ ...S.submitBtn, ...(busy ? S.disabled : {}) }}
+              disabled={busy}
+              onClick={() => handleDecompose(input)}
+            >
+              {busy ? '处理中…' : '生成提示词'}
+              <span style={S.submitArr}>→</span>
+            </button>
+            {genError && (
+              <div style={S.error} role="alert">
+                <strong>生成失败：</strong>{genError}
+                <div style={S.errorHint}>可按上一步返回调整内容后重试；也检查「后台管理」里的模型配置是否正确。</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {step === 'prompts' && (
+          <div className="fade-in">
+            {/* 系列信息卡 */}
+            <div style={S.seriesCard}>
+              <div style={S.seriesLeft}>
+                <button style={S.backBtn} onClick={() => setStep('input')}>← 返回</button>
+                <div>
+                  <div style={S.seriesKicker}>{stylePreset.label} · {pages.length} 页 · {studyCards.length} 张闪卡</div>
+                  <h2 style={S.seriesTitle}>{seriesTitle}</h2>
+                </div>
+              </div>
+              <div style={S.seriesBtns}>
+                <button
+                  style={S.ghostBtn}
+                  onClick={() => { prevStepRef.current = step; setStudyScope(seriesTitle); setStep('study'); }}
+                >
+                  复习
+                </button>
+                <button style={S.ghostBtn} onClick={copyAll}>复制全部</button>
+                <button style={S.ghostBtn} onClick={exportTxt}>TXT</button>
+                <button style={S.primaryBtn} onClick={exportJson}>JSON</button>
+                <button 
+                  style={{ ...S.ghostBtn, ...(showGraph ? S.btnActive : {}) }}
+                  onClick={() => setShowGraph(!showGraph)}
+                >
+                  图谱
+                </button>
+              </div>
+            </div>
+
+            {/* 质检面板 */}
+            {qualityReport && (
+              <QualityPanel
+                report={qualityReport}
+                selfCheckResult={selfCheckResult}
+                selfCheckBusy={selfCheckBusy}
+                onSelfCheck={handleSelfCheck}
+                showIssues={showIssues}
+                setShowIssues={setShowIssues}
+                moduleMap={moduleMap}
+                improvementInfo={improvementInfo}
+                onApply={applyImprovement}
+                onApplyAll={applyAllImprovements}
+                onUndo={undoAdopt}
+              />
+            )}
+
+            {/* 提示词卡片列表：锚点图在最前，其后逐页 */}
+            <div style={S.promptList} className="stagger">
+              {anchorPrompt && (
+                <article style={{ ...S.promptCard, border: '1.5px solid var(--accent)' }}>
+                  <div style={S.pcHead}>
+                    <div style={S.pcLeft}>
+                      <div style={S.pcIndex}>
+                        <span style={S.pcIndexNum}>锚</span>
+                      </div>
+                      <div>
+                        <h3 style={S.pcTitle}>风格锚点图 · 先生成这张</h3>
+                        <div style={S.pcMeta}>
+                          <span>整组风格基准</span>
+                          <span style={S.metaDot}>·</span>
+                          <span>后续每页把它当参考图</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        style={{ ...S.copyBtn, ...(anchorBusy ? { opacity: 0.6, cursor: 'not-allowed' } : {}) }}
+                        disabled={anchorBusy}
+                        onClick={genAnchorImg}
+                      >
+                        {anchorBusy ? '生成中…' : anchorImg ? '重生成锚点图' : '⚡ AI 生成锚点图'}
+                      </button>
+                      <button style={S.copyBtn} onClick={() => copyOne(anchorPrompt)}>复制</button>
+                    </div>
+                  </div>
+                  {anchorImg && (
+                    <div style={{ padding: '0 16px 12px' }}>
+                      <img
+                        src={anchorImg}
+                        alt="风格锚点图"
+                        style={{ width: '100%', maxWidth: 420, borderRadius: 10, border: '1px solid var(--border)', display: 'block' }}
+                      />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
+                        <button style={S.copyBtn} onClick={downloadAnchor}>下载锚点图</button>
+                        <span style={{ ...S.learnDesc, fontSize: 12 }}>外部生图时把这张图上传作参考图，即可锁住整组风格</span>
                       </div>
                     </div>
                   )}
-                </div>
+                  <div style={{ ...S.learnDesc, padding: '0 16px 10px' }}>{REFERENCE_WORKFLOW}</div>
+                  <pre style={S.promptText}>{anchorPrompt}</pre>
+                </article>
               )}
+              {pages.map((pg, i) => (
+                <PromptCard
+                  key={pg.page.id}
+                  index={i + 1}
+                  pageData={pg}
+                  onCopy={() => copyOne(pg.prompt)}
+                />
+              ))}
+            </div>
 
-              {/* 操作按钮 */}
-              <button onClick={() => handleRegenerateImage(activeCardIndex)}
-                className="w-full py-2 mb-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition">
-                🔄 重新生成此张图片
-              </button>
+            {seriesStyle && pages.length > 0 && (
+              <>
+                <CardGallery
+                  modules={pages.flatMap(pg => pg.modules)}
+                  style={seriesStyle}
+                  seriesTitle={seriesTitle}
+                  useMock={useMock}
+                  cardKeyPrefix={`card-${genTag}-`}
+                  onToast={showToast}
+                  onImageGenerated={markCardImage}
+                />
 
-              {stage === 'review-image' && (
-                <button onClick={handleDesignCards} disabled={cards.some(c => c.imageStatus !== 'done')}
-                  className="w-full py-2.5 mb-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg font-medium text-sm hover:from-purple-600 hover:to-pink-600 transition disabled:opacity-50 flex items-center justify-center gap-2">
-                  <span>✨</span> AI卡片设计（每张卡独一无二）
-                </button>
-              )}
-
-              {stage === 'review-design' && (
-                <>
-                  <button onClick={() => handleRegenerateDesign(activeCardIndex)}
-                    className="w-full py-2 mb-2 border border-purple-300 rounded-lg text-sm text-purple-700 hover:bg-purple-50 transition">
-                    🔄 重新设计此张卡片
+                {/* 路 C：学习页 */}
+                <div style={S.learnBox}>
+                  <div style={S.learnInfo}>
+                    <b style={S.learnTitle}>📚 学习页</b>
+                    <span style={S.learnDesc}>
+                      在本页直接浏览全部知识点：画报式配图 + 完整正文与要点，点文字即可就地编辑。
+                      {learnBusy && ' 正在扩充内容…'}
+                    </span>
+                  </div>
+                  <button style={S.learnBtn} onClick={() => setStep('learn')}>
+                    进入学习页
                   </button>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button onClick={() => setStage('review-image')}
-                      className="py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50 transition">
-                      ← 返回图片
-                    </button>
-                    <button onClick={() => setStage('typeset')}
-                      className="py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-lg font-medium text-sm hover:from-amber-600 hover:to-orange-600 transition flex items-center justify-center gap-2">
-                      <span>📐</span> 进入排版导出
-                    </button>
-                  </div>
-                </>
-              )}
-            </section>
-          )}
-
-          {/* ===== Stage 5: 排版导出 ===== */}
-          {stage === 'typeset' && activeCard && (
-            <section>
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-gray-700">阶段5：排版导出</h2>
-                <button onClick={() => setStage('review-image')} className="text-xs text-gray-400 hover:text-gray-600">← 图片</button>
-              </div>
-
-              <CardSelector />
-
-              <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-                <p className="text-sm text-amber-700 font-medium">📐 排版预览</p>
-                <p className="text-xs text-amber-600 mt-1">AI图做背景层，文字用HTML叠加，右侧实时预览</p>
-              </div>
-
-              {/* 快速编辑 */}
-              <Field label="主标题" value={activeContent.title} onChange={v => updateActiveCardContent({ ...activeContent, title: v })} />
-              <Field label="正文" value={activeContent.body} onChange={v => updateActiveCardContent({ ...activeContent, body: v })} multiline />
-
-              {/* 单张导出 */}
-              <button onClick={handleExport} disabled={exportProgress.active}
-                className="w-full py-2.5 bg-gray-800 text-white rounded-lg font-medium text-sm hover:bg-gray-700 transition flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
-                <span>⬇</span> 导出当前PNG
-              </button>
-
-              {isSeries && (
-                <p className="text-xs text-gray-400 mt-1.5 text-center">当前导出第{activeCardIndex + 1}张</p>
-              )}
-
-              {/* 批量导出 */}
-              {isSeries && cards.length > 1 && (
-                <div className="mt-3 pt-3 border-t border-gray-200">
-                  <p className="text-xs font-medium text-gray-600 mb-2">批量导出（共{cards.length}张）</p>
-                  <div className="flex gap-2">
-                    <button onClick={handleExportBatch} disabled={exportProgress.active}
-                      className="flex-1 py-2 bg-blue-600 text-white rounded-lg font-medium text-xs hover:bg-blue-700 transition flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
-                      <span>📥</span> 批量下载
-                    </button>
-                    <button onClick={handleExportZip} disabled={exportProgress.active}
-                      className="flex-1 py-2 bg-green-600 text-white rounded-lg font-medium text-xs hover:bg-green-700 transition flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
-                      <span>📦</span> ZIP打包
-                    </button>
-                  </div>
-                  <p className="text-xs text-gray-400 mt-1.5 text-center">批量下载逐张保存，ZIP打包合为一个文件</p>
                 </div>
-              )}
 
-              {/* 导出进度 */}
-              {exportProgress.active && (
-                <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-medium text-blue-700">{exportProgress.msg}</span>
-                    {exportProgress.total > 0 && (
-                      <span className="text-xs text-blue-600">{exportProgress.current}/{exportProgress.total}</span>
+                {/* 概念关系图谱：由系列卡「图谱」按钮开关 */}
+                {showGraph && (
+                  <div style={S.graphSection} className="fade-in">
+                    <div style={S.graphTitle}>概念关系图谱 · 点击节点查看模块</div>
+                    <ConceptGraph
+                      modules={allModules}
+                      selectedModuleId={selectedModuleId ?? undefined}
+                      onSelectModule={(m) => setSelectedModuleId(m.id)}
+                    />
+                    {selectedModule && (
+                      <div style={S.moduleDetail}>
+                        <b style={{ color: 'var(--text-bright)' }}>{selectedModule.title}</b>
+                        <p style={{ margin: '8px 0 0', fontSize: 13, lineHeight: 1.7, color: 'var(--text-mute)' }}>
+                          {selectedModule.body}
+                        </p>
+                      </div>
                     )}
                   </div>
-                  {exportProgress.total > 0 && (
-                    <div className="w-full h-2 bg-blue-100 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-blue-500 transition-all duration-300 rounded-full"
-                        style={{ width: `${(exportProgress.current / exportProgress.total) * 100}%` }}
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
-            </section>
-          )}
-
-          {errorMsg && <p className="text-xs text-red-500 mt-2">{errorMsg}</p>}
-        </div>
-
-        {/* 生成中状态条 */}
-        {isGenerating && (
-          <div className="px-5 py-2 border-t border-gray-200 bg-amber-50">
-            <p className="text-xs text-amber-600 flex items-center gap-1.5">
-              <Spinner /> {status || '处理中...'}
-            </p>
+                )}
+              </>
+            )}
           </div>
         )}
-      </aside>
 
-      {/* ====== 右侧预览区 ====== */}
-      <main className="flex-1 flex flex-col overflow-hidden bg-gray-200">
-        {stage === 'input' ? (
-          /* 输入阶段：展示模板预览，点击模板即时切换 */
-          <TemplatePreview template={selectedTemplate} stylePreset={selectedStylePreset} />
-        ) : (
-          <>
-            <div className="px-6 py-2.5 bg-white border-b border-gray-200 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <span className="text-sm font-medium text-gray-700">预览</span>
-                <span className="text-xs text-gray-400">{selectedTemplate.canvas.width}×{selectedTemplate.canvas.height}</span>
-                {isSeries && activeCard && <span className="text-xs text-blue-500">第{activeCardIndex + 1}/{cards.length}张</span>}
-              </div>
-              <div className="flex items-center gap-3">
-                {activeImageUrl && <span className="text-xs text-green-600 flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500"></span>底图已生成</span>}
-                {knowledge && <span className="text-xs text-blue-600 flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500"></span>知识库</span>}
-                <span className="text-xs text-gray-400">{selectedStylePreset.name}</span>
-              </div>
-            </div>
-
-            <div ref={previewContainerRef} className="flex-1 flex items-center justify-center overflow-auto p-6"
-              style={{ background: 'repeating-conic-gradient(#e5e5e5 0% 25%, #f5f5f5 0% 50%) 50% / 20px 20px' }}>
-              {activeCard ? (
-                <div style={{
-                  width: selectedTemplate.canvas.width * previewScale,
-                  height: selectedTemplate.canvas.height * previewScale,
-                  boxShadow: '0 10px 40px rgba(0,0,0,0.15)',
-                  borderRadius: 8, overflow: 'hidden',
-                }}>
-                  {renderCard()}
-                </div>
-              ) : (
-                <div className="text-center text-gray-400">
-                  <p className="text-4xl mb-3">🎨</p>
-                  <p className="text-sm">输入主题后开始生成信息图</p>
-                  <p className="text-xs mt-1">五阶段全链路自动化生产</p>
-                </div>
-              )}
-            </div>
-
-            <div className="px-6 py-2 bg-white border-t border-gray-200 flex items-center justify-between text-xs text-gray-500">
-              <span>模板: {selectedTemplate.name} · 缩放: {Math.round(previewScale * 100)}%</span>
-              <span>{status || '就绪'}</span>
-            </div>
-          </>
+        {step === 'learn' && seriesStyle && pages.length > 0 && (
+          <LearnBrowseView
+            modules={mergedLearnModules}
+            groups={pages.map(pg => ({ title: pg.page.title, moduleIds: pg.page.moduleIds }))}
+            seriesTitle={seriesTitle}
+            seriesStyle={seriesStyle}
+            learnBusy={learnBusy}
+            onContentChange={(updated) => {
+              // 编辑后的模块写回 pages（保持同一次工作流内编辑可见）
+              const byId = new Map(updated.map(m => [m.id, m]));
+              setPages(prev => prev.map(pg => ({
+                ...pg,
+                modules: pg.modules.map(m => byId.get(m.id) ?? m),
+              })));
+            }}
+            onBack={() => setStep('prompts')}
+          />
         )}
+
+        {step === 'study' && (
+          <StudyView
+            cards={studyCards}
+            onCardsChange={setStudyCards}
+            filterSource={studyScope}
+            onBack={() => setStep(prevStepRef.current === 'study' ? 'prompts' : prevStepRef.current)}
+          />
+        )}
+
+        {step === 'quiz' && (
+          <QuizView
+            modules={pages.flatMap(pg => pg.modules)}
+            onBack={() => setStep('prompts')}
+            onToast={showToast}
+          />
+        )}
+
+        {step === 'export' && (
+          <BatchExportView
+            pages={pages.map(pg => ({
+              id: pg.page.id,
+              title: pg.page.title,
+              moduleIds: pg.page.moduleIds,
+              ratio: pg.page.ratio,
+              visualHint: pg.page.visualHint,
+            }))}
+            prompts={pages.map(pg => pg.prompt)}
+            style={seriesStyle!}
+            seriesTitle={seriesTitle}
+            onBack={() => setStep('prompts')}
+            onToast={showToast}
+          />
+        )}
+
+        {step === 'admin' && (
+          <AdminView onBack={() => setStep(prevStepRef.current)} onToast={showToast} />
+        )}
+        </StepErrorBoundary>
       </main>
+
+      {toast && <div style={S.toast} className="fade-in">{toast}</div>}
     </div>
   );
+}
+
+// ===================== 子组件 =====================
+
+function StepDot({ active, done, num, label }: { active: boolean; done: boolean; num: number; label: string }) {
+  return (
+    <div style={{ ...S.stepDot, ...(active ? S.stepDotActive : {}) }}>
+      <span style={S.stepNum}>{num}</span>
+      <span style={S.stepLabel}>{label}</span>
+    </div>
+  );
+}
+
+function OptCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={S.optCard}>
+      <div style={S.optTitle}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function QualityPanel({
+  report, selfCheckResult, selfCheckBusy, onSelfCheck, showIssues, setShowIssues, moduleMap,
+  improvementInfo, onApply, onApplyAll, onUndo,
+}: {
+  report: QualityReport;
+  selfCheckResult: SelfCheckResult | null;
+  selfCheckBusy: boolean;
+  onSelfCheck: () => void;
+  showIssues: boolean;
+  setShowIssues: (v: boolean) => void;
+  moduleMap: Map<string, KnowledgeModule>;
+  improvementInfo: Map<string, ImprovementEntry>;
+  onApply: (imp: ImprovedMod) => void;
+  onApplyAll: (list: ImprovedMod[]) => void;
+  onUndo: (id: string) => void;
+}) {
+  const scoreColor = report.score >= 80 ? 'var(--success)' : report.score >= 60 ? 'var(--warning)' : 'var(--accent)';
+
+  const allIssues = useMemo(() => {
+    const list: Array<QualityIssue | SelfCheckIssue & { code?: string; source: 'rule' | 'ai' }> = [
+      ...report.issues.map((i) => ({ ...i, source: 'rule' as const })),
+      ...(selfCheckResult?.issues.map((i, idx) => ({ ...i, code: `AI-${idx + 1}`, source: 'ai' as const })) ?? []),
+    ];
+    list.sort((a, b) => ({ error: 0, warning: 1, info: 2 })[a.severity] - ({ error: 0, warning: 1, info: 2 })[b.severity]);
+    return list;
+  }, [report.issues, selfCheckResult?.issues]);
+
+  // B 模型给了修改建议、但没有任何对应问题条目的模块（透明度考虑：单独列出，不藏在批量按钮里）
+  const orphanImprovements = useMemo(() => {
+    const issueTargets = new Set(selfCheckResult?.issues.map((i) => i.moduleId) ?? []);
+    return (selfCheckResult?.improvedModules ?? []).filter((i) => !issueTargets.has(i.id));
+  }, [selfCheckResult]);
+
+  const allEntries = useMemo(() => [...improvementInfo.values()], [improvementInfo]);
+  const pendingList = allEntries.filter((e) => !e.adopted).map((e) => e.imp);
+  const adoptedCount = allEntries.length - pendingList.length;
+
+  const errorCount = allIssues.filter(i => i.severity === 'error').length;
+  const warningCount = allIssues.filter(i => i.severity === 'warning').length;
+  const infoCount = allIssues.filter(i => i.severity === 'info').length;
+
+  return (
+    <div style={S.qCard}>
+      <div style={S.qTop}>
+        {/* 分数 */}
+        <div style={S.scoreWrap}>
+          <div style={{ ...S.scoreNum, color: scoreColor }}>{report.score}</div>
+          <div style={S.scoreLabel}>规则快检</div>
+        </div>
+
+        {/* 维度条 */}
+        <div style={S.dims}>
+          <DimBar label="完整性" score={report.dimensions.completeness} />
+          <DimBar label="逻辑性" score={report.dimensions.consistency} />
+          <DimBar label="数字" score={report.dimensions.numerics} />
+          <DimBar label="风险" score={100 - report.dimensions.riskLevel} />
+        </div>
+
+        {/* AI 按钮 */}
+        <div style={S.aiCol}>
+          {selfCheckResult ? (
+            <div style={S.aiScoreWrap}>
+              <div style={{
+                ...S.aiScoreNum,
+                color: selfCheckResult.confidenceScore >= 80 ? 'var(--success)'
+                  : selfCheckResult.confidenceScore >= 60 ? 'var(--warning)' : 'var(--accent)'
+              }}>
+                {selfCheckResult.confidenceScore}
+              </div>
+              <div style={S.aiScoreLabel}>AI 可信度</div>
+            </div>
+          ) : (
+            <button style={{ ...S.aiBtn, ...(selfCheckBusy ? S.disabled : {}) }} disabled={selfCheckBusy} onClick={onSelfCheck}>
+              {selfCheckBusy ? '质检中…' : 'AI 深度质检'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {report.riskLabel !== '低风险' && (
+        <div style={report.riskLabel === '高风险' ? S.riskHigh : S.riskMed}>
+          ⚠ {report.riskLabel}内容 · 建议专业复核后再发布
+        </div>
+      )}
+
+      {selfCheckResult?.overallComment && (
+        <div style={S.aiComment}>💡 {selfCheckResult.overallComment}</div>
+      )}
+
+      {pendingList.length > 0 && (
+        <div style={S.batchRow}>
+          <span>B 模型提供了 <b>{pendingList.length}</b> 条改写建议</span>
+          <button style={S.batchBtn} onClick={() => onApplyAll(pendingList)}>全部采纳</button>
+        </div>
+      )}
+      {adoptedCount > 0 && (
+        <div style={S.adoptedNote}>✓ 已采纳 {adoptedCount} 条改写 · 在对应条目里可“恢复原文”</div>
+      )}
+
+      <div style={S.issueHead} onClick={() => setShowIssues(!showIssues)}>
+        <span>
+          <b>{allIssues.length}</b> 个问题
+          {errorCount > 0 && <span style={{ color: 'var(--error)' }}> · {errorCount} 严重</span>}
+          {warningCount > 0 && <span style={{ color: 'var(--warning)' }}> · {warningCount} 警告</span>}
+          {infoCount > 0 && <span style={{ color: 'var(--success)' }}> · {infoCount} 提示</span>}
+        </span>
+        <span style={S.chev}>{showIssues ? '▲' : '▼'}</span>
+      </div>
+
+      {showIssues && allIssues.length > 0 && (
+        <div style={S.issueList}>
+          {allIssues.map((issue, idx) => (
+            <IssueItem
+              key={idx}
+              issue={issue}
+              moduleMap={moduleMap}
+              entry={issue.moduleId ? improvementInfo.get(issue.moduleId) : undefined}
+              onApply={onApply}
+              onUndo={onUndo}
+            />
+          ))}
+        </div>
+      )}
+      {showIssues && allIssues.length === 0 && orphanImprovements.length === 0 && (
+        <div style={S.noIssue}>✓ 未发现问题，内容质量良好</div>
+      )}
+      {showIssues && orphanImprovements.length > 0 && (
+        <div style={S.issueList}>
+          {orphanImprovements.map((imp) => (
+            <div key={`orphan-${imp.id}`} style={S.issue}>
+              <div style={S.issueTop}>
+                <span style={{ ...S.badge, ...S.badgeI }}>建议</span>
+                <span style={S.issueSrc}>AI 改写</span>
+                {moduleMap.get(imp.id) && <span style={S.issueMod}>{moduleMap.get(imp.id)!.title}</span>}
+              </div>
+              <div style={S.issueMsg}>B 模型认为这张卡可以直接改写得更准（未列出具体问题）</div>
+              <ImprovementBlock
+                entry={improvementInfo.get(imp.id)!}
+                current={moduleMap.get(imp.id)}
+                onApply={onApply}
+                onUndo={onUndo}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DimBar({ label, score }: { label: string; score: number }) {
+  const color = score >= 80 ? 'var(--success)' : score >= 60 ? 'var(--warning)' : 'var(--accent)';
+  return (
+    <div style={S.dim}>
+      <div style={S.dimTop}>
+        <span style={S.dimLabel}>{label}</span>
+        <span style={S.dimVal}>{score}</span>
+      </div>
+      <div style={S.dimTrack}>
+        <div style={{ ...S.dimFill, width: `${score}%`, background: color }} />
+      </div>
+    </div>
+  );
+}
+
+function IssueItem({ issue, moduleMap, entry, onApply, onUndo }: {
+  issue: QualityIssue | (SelfCheckIssue & { code?: string; source?: string });
+  moduleMap: Map<string, KnowledgeModule>;
+  entry?: ImprovementEntry;
+  onApply: (imp: ImprovedMod) => void;
+  onUndo: (id: string) => void;
+}) {
+  const sev = issue.severity;
+  const sevStyle = sev === 'error' ? S.badgeE : sev === 'warning' ? S.badgeW : S.badgeI;
+  const sevLabel = sev === 'error' ? '严重' : sev === 'warning' ? '警告' : '提示';
+  const src = (issue as any).source === 'ai' ? 'AI 质检' : '规则检测';
+  const curMod = issue.moduleId ? moduleMap.get(issue.moduleId) : undefined;
+  const modName = curMod?.title;
+  // 兜底：AI 报了要点层的事实错误，但改进建议漏给修正后的要点 → 采纳后错误要点仍在，必须明示
+  const bulletMiss = (issue as any).source === 'ai' && (issue as any).type === 'accuracy' &&
+    !!curMod?.bullets?.length && !!entry && !entry.imp.bullets?.length;
+
+  return (
+    <div style={S.issue}>
+      <div style={S.issueTop}>
+        <span style={{ ...S.badge, ...sevStyle }}>{sevLabel}</span>
+        <span style={S.issueSrc}>{src}</span>
+        {issue.code && <span style={S.issueCode}>{issue.code}</span>}
+        {modName && <span style={S.issueMod}>{modName}</span>}
+      </div>
+      <div style={S.issueMsg}>{issue.message}</div>
+      {issue.suggestion && <div style={S.issueSug}>💡 {issue.suggestion}</div>}
+      {entry && (
+        <ImprovementBlock
+          entry={entry}
+          current={curMod}
+          onApply={onApply}
+          onUndo={onUndo}
+          bulletMiss={bulletMiss}
+        />
+      )}
+    </div>
+  );
+}
+
+/** 改前 / 改后 双栏对比（含逐词差异高亮） */
+
+/** 单侧渲染 diff：side='a' 显示左栏（删的标红），side='b' 显示右栏（新增的标绿） */
+function DiffText({ a, b, side }: { a: string; b: string; side: 'a' | 'b' }) {
+  const toks = diffTokens(a, b);
+  const kept = side === 'a' ? toks.filter(t => t.kind !== 'add') : toks.filter(t => t.kind !== 'del');
+  const runs: { kind: 'same' | 'del' | 'add'; text: string }[] = [];
+  for (const t of kept) {
+    const last = runs[runs.length - 1];
+    if (last && last.kind === t.kind) last.text += t.text;
+    else runs.push({ ...t });
+  }
+  return (
+    <>
+      {runs.map((t, i) =>
+        t.kind === 'del' ? <span key={i} style={S.diffDel}>{t.text}</span>
+        : t.kind === 'add' ? <span key={i} style={S.diffAdd}>{t.text}</span>
+        : <span key={i}>{t.text}</span>)}
+    </>
+  );
+}
+
+function DiffCols({ left, right, leftLabel, rightLabel }: {
+  left: ContentLike;
+  right: ContentLike;
+  leftLabel: string;
+  rightLabel: string;
+}) {
+  const col = (mod: ContentLike, label: string, accent: boolean, side: 'a' | 'b') => (
+    <div style={{ ...S.diffCol, ...(accent ? S.diffColNew : {}) }}>
+      <div style={S.diffHead}>{label}</div>
+      <div style={S.diffTitle}><DiffText a={left.title} b={right.title} side={side} /></div>
+      <div style={S.diffBody}><DiffText a={left.body} b={right.body} side={side} /></div>
+      {left.bullets?.length || right.bullets?.length ? (
+        <ul style={S.diffBullets}>
+          {Array.from({ length: Math.max(left.bullets?.length ?? 0, right.bullets?.length ?? 0) }, (_, i) => (
+            <li key={i}>
+              <DiffText a={left.bullets?.[i] ?? ''} b={right.bullets?.[i] ?? ''} side={side} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+  return (
+    <div style={S.diffWrap}>
+      {col(left, leftLabel, false, 'a')}
+      {col(right, rightLabel, true, 'b')}
+    </div>
+  );
+}
+
+/** B 模型改写建议的采纳交互：先看对比，确认后采纳；已采纳可看原文、可恢复 */
+function ImprovementBlock({ entry, current, onApply, onUndo, bulletMiss }: {
+  entry: ImprovementEntry;
+  current?: KnowledgeModule;
+  onApply: (imp: ImprovedMod) => void;
+  onUndo: (id: string) => void;
+  bulletMiss?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const { imp, adopted, before } = entry;
+  if (!current) return null;
+
+  if (adopted) {
+    return (
+      <div style={S.adoptWrap}>
+        <div style={S.adoptRow}>
+          <span style={S.adoptedTag}>✓ 已采纳 B 版</span>
+          <button style={S.linkBtn} onClick={() => setOpen(!open)}>
+            {open ? '收起对比' : '查看改前/改后对比'}
+          </button>
+          <button style={S.undoBtn} onClick={() => onUndo(imp.id)}>恢复原文</button>
+        </div>
+        {bulletMiss && (
+          <div style={S.bulletMissNote}>
+            ⚠ 该问题定位在"要点"里的事实错误，但 B 版没给出修正后的要点——采纳后这条要点可能仍是错的内容，请对照上方的修改建议人工核对。
+          </div>
+        )}
+        {open && before && (
+          <DiffCols left={before} right={current} leftLabel="改前（原文）" rightLabel="改后（当前 · B 版）" />
+        )}
+      </div>
+    );
+  }
+
+  const after = buildAfter(current, imp);
+  return (
+    <div style={S.adoptWrap}>
+      {!open ? (
+        <button style={S.viewFixBtn} onClick={() => setOpen(true)}>查看 B 模型改写 →</button>
+      ) : (
+        <>
+          <DiffCols left={current} right={after} leftLabel="当前版本" rightLabel="B 模型建议版" />
+          <div style={S.adoptRow}>
+            <button
+              style={S.adoptConfirmBtn}
+              onClick={() => { onApply(imp); setOpen(false); }}
+            >
+              采纳此修改
+            </button>
+            <button style={S.linkBtn} onClick={() => setOpen(false)}>收起</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PromptCard({ index, pageData, onCopy }: {
+  index: number;
+  pageData: PageData;
+  onCopy: () => void;
+}) {
+  const { page, modules, prompt } = pageData;
+  return (
+    <article style={S.promptCard}>
+      <div style={S.pcHead}>
+        <div style={S.pcLeft}>
+          <div style={S.pcIndex}>
+            <span style={S.pcIndexNum}>{String(index).padStart(2, '0')}</span>
+          </div>
+          <div>
+            <h3 style={S.pcTitle}>{page.title}</h3>
+            <div style={S.pcMeta}>
+              <span>{modules.length} 个模块</span>
+              <span style={S.metaDot}>·</span>
+              <span>{page.ratio}</span>
+            </div>
+          </div>
+        </div>
+        <button style={S.copyBtn} onClick={onCopy}>复制</button>
+      </div>
+
+      <div style={S.pcTags}>
+        {modules.map((m, i) => (
+          <span key={i} style={S.tag}>
+            {m.icon ? m.icon + ' ' : ''}{m.title}
+          </span>
+        ))}
+      </div>
+
+      <pre style={S.promptText}>{prompt}</pre>
+    </article>
+  );
+}
+
+// ===================== 辅助函数 =====================
+
+async function readFileAsText(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  const utf8 = new TextDecoder('utf-8').decode(buf);
+  // GBK/GB18030 编码的中文按 UTF-8 误读会产出替换符 U+FFFD；超过 1% 才判定为乱码并用 GB18030 重读
+  const badRatio = (utf8.match(/\uFFFD/g) ?? []).length / Math.max(utf8.length, 1);
+  if (badRatio >= 0.01) {
+    try {
+      return new TextDecoder('gb18030').decode(buf);
+    } catch {
+      /* 浏览器不支持 gb18030 时退回 UTF-8 原文 */
+    }
+  }
+  return utf8;
+}
+
+let pdfjsPromise: Promise<typeof import('pdfjs-dist')> | null = null;
+/** 懒加载 pdfjs 主体（首次用到 PDF 时拉取，避免首屏多 400KB+）；workerSrc 只需设置一次 */
+function loadPdfjs(): Promise<typeof import('pdfjs-dist')> {
+  if (!pdfjsPromise) {
+    pdfjsPromise = import('pdfjs-dist').then((m) => {
+      m.GlobalWorkerOptions.workerSrc = pdfWorker;
+      return m;
+    });
+  }
+  return pdfjsPromise;
+}
+
+async function extractPDF(file: File): Promise<string> {
+  try {
+    const pdfjs = await loadPdfjs();
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjs.getDocument({ data: buf }).promise;
+    const pages: string[] = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      // 文本项按读取顺序拼接；PDF 会把一行字拆成多段，用纵坐标分块避免串行
+      const byY = new Map<number, string[]>();
+      for (const item of content.items) {
+        const t = 'str' in item ? item.str : '';
+        if (!t) continue;
+        const y = 'transform' in item ? Math.round(item.transform[5]) : 0;
+        const block = byY.get(y) ?? [];
+        block.push(t);
+        byY.set(y, block);
+      }
+      const line = [...byY.entries()]
+        .sort((a, b) => b[0] - a[0])
+        .map(([, toks]) => toks.join(' '))
+        .join('\n');
+      pages.push(line);
+    }
+    const text = pages.join('\n\n').trim();
+    if (text.length < 8) {
+      throw new Error('该 PDF 没有可提取的文本层（可能是扫描件/图片型 PDF），请改用文本版或手动粘贴');
+    }
+    return text;
+  } catch (err) {
+    if (err instanceof Error && /没有可提取的文本层/.test(err.message)) throw err;
+    throw new Error('PDF 解析失败：' + (err instanceof Error ? err.message : '未知错误'));
+  }
+}
+
+// ===================== 样式 =====================
+
+const S: Record<string, React.CSSProperties> = {
+  page: {
+    maxWidth: 900,
+    margin: '0 auto',
+    padding: '24px 20px 80px',
+    minHeight: '100vh',
+    position: 'relative',
+    zIndex: 1,
+  },
+
+  // —— 顶部导航 ——
+  nav: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 24,
+    padding: '12px 16px',
+    background: 'var(--surface)',
+    backdropFilter: 'blur(16px)',
+    WebkitBackdropFilter: 'blur(16px)',
+    border: '1px solid var(--border)',
+    borderRadius: 16,
+    boxShadow: 'var(--shadow-sm)',
+  },
+  navLeft: { display: 'flex', alignItems: 'center', gap: 12 },
+  logoIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    background: 'var(--accent-gradient)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 18,
+    color: '#fff',
+    boxShadow: 'var(--shadow-glow)',
+  },
+  logoText: { display: 'flex', flexDirection: 'column', gap: 1 },
+  logoTitle: { fontSize: 16, fontWeight: 700, color: 'var(--text-bright)', lineHeight: 1.2 },
+  logoSub: { fontSize: 10, color: 'var(--text-muted)', letterSpacing: '0.02em' },
+  navRight: { display: 'flex', alignItems: 'center', gap: 8 },
+  mockBadge: {
+    fontSize: 10,
+    fontWeight: 700,
+    color: 'var(--accent)',
+    background: 'var(--accent-soft)',
+    padding: '4px 10px',
+    borderRadius: 999,
+    letterSpacing: '0.1em',
+  },
+  iconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    border: '1px solid var(--border)',
+    background: 'transparent',
+    cursor: 'pointer',
+    fontSize: 16,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    transition: 'background .2s',
+  },
+  studyBtn: {
+    fontSize: 13,
+    fontWeight: 600,
+    color: 'var(--accent-text)',
+    background: 'var(--accent-gradient)',
+    border: 'none',
+    borderRadius: 10,
+    padding: '8px 16px',
+    cursor: 'pointer',
+    boxShadow: 'var(--shadow-glow)',
+    transition: 'transform .15s',
+  },
+
+  // —— 步骤条 ——
+  stepBar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 0,
+    marginBottom: 24,
+  },
+  stepDot: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '8px 16px',
+    borderRadius: 999,
+    background: 'var(--surface)',
+    border: '1px solid var(--border)',
+    color: 'var(--text-muted)',
+    transition: 'all .3s',
+  },
+  stepDotActive: {
+    background: 'var(--accent-gradient)',
+    borderColor: 'transparent',
+    color: '#fff',
+    boxShadow: 'var(--shadow-glow)',
+  },
+  stepNum: {
+    width: 22,
+    height: 22,
+    borderRadius: '50%',
+    background: 'var(--elevated)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 11,
+    fontWeight: 700,
+  },
+  stepLabel: { fontSize: 13, fontWeight: 500 },
+  stepLine: {
+    width: 48,
+    height: 2,
+    background: 'var(--border)',
+    margin: '0 -2px',
+    zIndex: 0,
+  },
+  stepLineActive: { background: 'var(--accent-gradient)' },
+
+  // —— 主内容 ——
+  main: {},
+
+  // —— 输入卡片 ——
+  card: {
+    background: 'var(--surface)',
+    backdropFilter: 'blur(16px)',
+    WebkitBackdropFilter: 'blur(16px)',
+    border: '1px solid var(--border)',
+    borderRadius: 20,
+    padding: 32,
+    boxShadow: 'var(--shadow-md)',
+  },
+  cardHead: { marginBottom: 24 },
+  kicker: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--accent)',
+    letterSpacing: '0.15em',
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  h2: {
+    fontSize: 26,
+    fontWeight: 700,
+    color: 'var(--text-bright)',
+    marginBottom: 4,
+    lineHeight: 1.2,
+  },
+  h2desc: { fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.5 },
+
+  // —— 输入方式切换 ——
+  inputTypeSwitch: {
+    display: 'flex',
+    gap: 8,
+    marginBottom: 20,
+  },
+  inputTypeBtn: {
+    flex: 1,
+    padding: '10px 16px',
+    fontSize: 13,
+    fontWeight: 500,
+    color: 'var(--text-muted)',
+    background: 'var(--surface-2)',
+    border: '1px solid var(--border)',
+    borderRadius: 10,
+    cursor: 'pointer',
+    transition: 'all .2s',
+  },
+  inputTypeBtnActive: {
+    color: 'var(--accent-text)',
+    background: 'var(--accent-gradient)',
+    borderColor: 'transparent',
+    boxShadow: 'var(--shadow-glow)',
+  },
+
+  field: { marginBottom: 20 },
+  label: {
+    display: 'block',
+    fontSize: 12,
+    fontWeight: 600,
+    color: 'var(--text-secondary)',
+    marginBottom: 8,
+  },
+  textarea: {
+    width: '100%',
+    boxSizing: 'border-box',
+    border: '1px solid var(--border-2)',
+    borderRadius: 12,
+    padding: 14,
+    fontSize: 14,
+    lineHeight: 1.7,
+    resize: 'vertical',
+    fontFamily: 'inherit',
+    background: 'var(--surface-3)',
+    color: 'var(--text)',
+    transition: 'border-color .2s, box-shadow .2s',
+    minHeight: 120,
+  },
+
+  // —— 文件上传 ——
+  fileDropZone: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 16,
+    padding: '24px 20px',
+    border: '2px dashed var(--border)',
+    borderRadius: 12,
+    cursor: 'pointer',
+    transition: 'all .2s',
+    background: 'var(--surface-3)',
+  },
+  fileIcon: { fontSize: 32 },
+  fileText: { display: 'flex', flexDirection: 'column', gap: 4 },
+  fileTitle: { fontSize: 14, fontWeight: 500, color: 'var(--text)' },
+  fileHint: { fontSize: 12, color: 'var(--text-muted)' },
+  loadedCard: {
+    marginTop: 12,
+    padding: '12px 16px',
+    border: '1px solid var(--border)',
+    borderRadius: 12,
+    background: 'var(--surface-3)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+  },
+  loadedHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  loadedTitle: { fontSize: 13, fontWeight: 600, color: 'var(--text)' },
+  loadedMeta: { fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' },
+  loadedPreview: {
+    fontSize: 12,
+    lineHeight: 1.6,
+    color: 'var(--text-muted)',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    maxHeight: 84,
+    overflow: 'hidden',
+  },
+
+  // —— URL 输入 ——
+  urlRow: {
+    display: 'flex',
+    gap: 8,
+  },
+  urlInput: {
+    flex: 1,
+    padding: '12px 14px',
+    fontSize: 14,
+    border: '1px solid var(--border-2)',
+    borderRadius: 10,
+    background: 'var(--surface-3)',
+    color: 'var(--text)',
+    fontFamily: 'inherit',
+  },
+  urlBtn: {
+    padding: '12px 20px',
+    fontSize: 14,
+    fontWeight: 600,
+    color: 'var(--accent-text)',
+    background: 'var(--accent-gradient)',
+    border: 'none',
+    borderRadius: 10,
+    cursor: 'pointer',
+    boxShadow: 'var(--shadow-glow)',
+  },
+
+  // —— AI 推荐 ——
+  recBox: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 14,
+    padding: 14,
+    borderRadius: 12,
+    background: 'var(--accent-soft)',
+    border: '1px solid rgba(var(--accent-rgb), 0.25)',
+    marginBottom: 20,
+  },
+  recDim: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 14,
+    padding: 14,
+    borderRadius: 12,
+    background: 'var(--surface-2)',
+    border: '1px solid var(--border)',
+    marginBottom: 20,
+    opacity: 0.6,
+  },
+  recIcon: { fontSize: 20 },
+  recTitle: { fontSize: 13, color: 'var(--text)', fontWeight: 500 },
+  recReason: { fontSize: 12, color: 'var(--text-muted)', marginTop: 2 },
+  recOk: {
+    fontSize: 11,
+    color: 'var(--success)',
+    fontWeight: 600,
+    padding: '4px 10px',
+    borderRadius: 999,
+    background: 'rgba(var(--success-rgb), 0.1)',
+  },
+  recBtn: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: 'var(--accent-text)',
+    background: 'var(--accent-gradient)',
+    border: 'none',
+    borderRadius: 8,
+    padding: '6px 14px',
+    cursor: 'pointer',
+    boxShadow: 'var(--shadow-glow)',
+  },
+
+  // —— 风格 chip ——
+  chipWrap: { display: 'flex', flexWrap: 'wrap', gap: 6 },
+  chip: {
+    fontSize: 12,
+    background: 'var(--surface-2)',
+    color: 'var(--text-muted)',
+    border: '1px solid var(--border)',
+    borderRadius: 999,
+    padding: '6px 14px',
+    cursor: 'pointer',
+    transition: 'all .2s',
+  },
+  chipActive: {
+    color: 'var(--accent-text)',
+    background: 'var(--accent-gradient)',
+    borderColor: 'transparent',
+    fontWeight: 500,
+    boxShadow: 'var(--shadow-glow)',
+  },
+  chipStar: { fontSize: 10, opacity: 0.9 },
+
+  // —— 选项行 ——
+  optsRow: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: 12,
+    marginBottom: 24,
+  },
+  optCard: {
+    padding: 14,
+    background: 'var(--surface-2)',
+    border: '1px solid var(--border)',
+    borderRadius: 12,
+  },
+  optTitle: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--text-muted)',
+    letterSpacing: '0.05em',
+    marginBottom: 10,
+  },
+  seg: {
+    display: 'inline-flex',
+    background: 'var(--surface-3)',
+    borderRadius: 8,
+    padding: 2,
+    border: '1px solid var(--border)',
+  },
+  segBtn: {
+    fontSize: 12,
+    background: 'transparent',
+    color: 'var(--text-muted)',
+    border: 'none',
+    padding: '6px 14px',
+    borderRadius: 6,
+    cursor: 'pointer',
+    transition: 'all .2s',
+    fontWeight: 500,
+  },
+  segOn: {
+    background: 'var(--surface)',
+    color: 'var(--text-bright)',
+    boxShadow: 'var(--shadow-sm)',
+  },
+  checkRow: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 8,
+    cursor: 'pointer',
+    userSelect: 'none',
+  },
+  check: { marginTop: 2, width: 14, height: 14, accentColor: 'var(--accent)', cursor: 'pointer' },
+  checkLabel: { fontSize: 13, color: 'var(--text)', lineHeight: 1.5 },
+  badgeOptsRow: { display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' as const },
+  miniSelect: {
+    padding: '4px 8px',
+    borderRadius: 8,
+    border: '1px solid var(--border-2)',
+    background: 'var(--surface-3)',
+    color: 'var(--text)',
+    fontSize: 12,
+    cursor: 'pointer',
+    outline: 'none',
+  },
+
+  // —— 提交按钮 ——
+  submitBtn: {
+    width: '100%',
+    padding: '14px 24px',
+    fontSize: 15,
+    fontWeight: 600,
+    color: '#fff',
+    background: 'var(--accent-gradient)',
+    border: 'none',
+    borderRadius: 12,
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    boxShadow: 'var(--shadow-glow)',
+    transition: 'transform .15s, box-shadow .2s, opacity .2s',
+  },
+  submitArr: { fontSize: 18, transition: 'transform .2s' },
+  disabled: { opacity: 0.5, cursor: 'not-allowed', boxShadow: 'none' },
+
+  // —— 学习页入口 ——
+  learnBox: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16,
+    padding: 18, marginTop: 20, flexWrap: 'wrap',
+    background: 'var(--surface)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
+    border: '1px solid var(--border)', borderRadius: 16, boxShadow: 'var(--shadow-md)',
+  },
+  learnInfo: { display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 200 },
+  learnTitle: { fontSize: 15, color: 'var(--text-bright)' },
+  learnDesc: { fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.5 },
+  learnBtn: {
+    padding: '10px 16px', borderRadius: 12, border: 'none', cursor: 'pointer',
+    background: 'var(--accent)', color: '#fff', fontSize: 14, fontWeight: 600, whiteSpace: 'nowrap',
+  },
+
+  // —— 系列信息卡 ——
+  seriesCard: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 16,
+    padding: 20,
+    background: 'var(--surface)',
+    backdropFilter: 'blur(16px)',
+    WebkitBackdropFilter: 'blur(16px)',
+    border: '1px solid var(--border)',
+    borderRadius: 16,
+    boxShadow: 'var(--shadow-md)',
+    marginBottom: 16,
+    flexWrap: 'wrap',
+  },
+  seriesLeft: { display: 'flex', alignItems: 'center', gap: 14 },
+  backBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    border: '1px solid var(--border)',
+    background: 'var(--surface-2)',
+    color: 'var(--text-muted)',
+    cursor: 'pointer',
+    fontSize: 14,
+    transition: 'all .2s',
+  },
+  seriesKicker: {
+    fontSize: 11,
+    color: 'var(--text-muted)',
+    marginBottom: 2,
+  },
+  seriesTitle: {
+    fontSize: 20,
+    fontWeight: 700,
+    color: 'var(--text-bright)',
+    margin: 0,
+    lineHeight: 1.2,
+  },
+  seriesBtns: { display: 'flex', gap: 6, flexWrap: 'wrap' },
+  ghostBtn: {
+    fontSize: 12,
+    background: 'var(--surface-2)',
+    color: 'var(--text-secondary)',
+    border: '1px solid var(--border)',
+    borderRadius: 8,
+    padding: '7px 14px',
+    cursor: 'pointer',
+    fontWeight: 500,
+    transition: 'all .2s',
+  },
+  primaryBtn: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#fff',
+    background: 'var(--accent-gradient)',
+    border: 'none',
+    borderRadius: 8,
+    padding: '7px 16px',
+    cursor: 'pointer',
+    boxShadow: 'var(--shadow-glow)',
+    transition: 'opacity .2s',
+  },
+
+  // —— 质检面板 ——
+  qCard: {
+    padding: 18,
+    background: 'var(--surface)',
+    backdropFilter: 'blur(16px)',
+    WebkitBackdropFilter: 'blur(16px)',
+    border: '1px solid var(--border)',
+    borderRadius: 16,
+    boxShadow: 'var(--shadow-sm)',
+    marginBottom: 16,
+  },
+  qTop: {
+    display: 'grid',
+    gridTemplateColumns: '100px 1fr 120px',
+    gap: 16,
+    alignItems: 'center',
+  },
+  scoreWrap: { textAlign: 'center' },
+  scoreNum: { fontSize: 36, fontWeight: 700, lineHeight: 1 },
+  scoreLabel: { fontSize: 10, color: 'var(--text-muted)', marginTop: 4, fontWeight: 500 },
+  dims: { display: 'flex', flexDirection: 'column', gap: 6 },
+  dim: {},
+  dimTop: { display: 'flex', justifyContent: 'space-between', marginBottom: 3 },
+  dimLabel: { fontSize: 11, color: 'var(--text-muted)' },
+  dimVal: { fontSize: 11, color: 'var(--text-secondary)', fontWeight: 600 },
+  dimTrack: { height: 4, borderRadius: 2, background: 'var(--border-2)', overflow: 'hidden' },
+  dimFill: { height: '100%', borderRadius: 2, transition: 'width .4s cubic-bezier(0.16,1,0.3,1)' },
+  aiCol: { display: 'flex', justifyContent: 'center' },
+  aiScoreWrap: { textAlign: 'center' },
+  aiScoreNum: { fontSize: 30, fontWeight: 700, lineHeight: 1 },
+  aiScoreLabel: { fontSize: 10, color: 'var(--text-muted)', marginTop: 4, fontWeight: 500 },
+  aiBtn: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--accent-text)',
+    background: 'var(--accent-gradient)',
+    border: 'none',
+    borderRadius: 8,
+    padding: '8px 14px',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+    boxShadow: 'var(--shadow-glow)',
+    transition: 'opacity .2s',
+  },
+  riskHigh: {
+    marginTop: 12,
+    padding: '10px 14px',
+    background: 'rgba(248,113,113,0.08)',
+    border: '1px solid rgba(248,113,113,0.2)',
+    borderRadius: 10,
+    fontSize: 12,
+    color: 'var(--error)',
+    fontWeight: 500,
+  },
+  riskMed: {
+    marginTop: 12,
+    padding: '10px 14px',
+    background: 'rgba(var(--warning-rgb),0.08)',
+    border: '1px solid rgba(var(--warning-rgb),0.2)',
+    borderRadius: 10,
+    fontSize: 12,
+    color: 'var(--warning)',
+    fontWeight: 500,
+  },
+  aiComment: {
+    marginTop: 10,
+    padding: '10px 14px',
+    background: 'var(--surface-2)',
+    borderRadius: 10,
+    fontSize: 12,
+    color: 'var(--text-muted)',
+    lineHeight: 1.6,
+  },
+  issueHead: {
+    marginTop: 12,
+    padding: '8px 0',
+    borderTop: '1px solid var(--border)',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    cursor: 'pointer',
+    fontSize: 12,
+    color: 'var(--text-secondary)',
+  },
+  chev: { fontSize: 9, color: 'var(--text-muted)' },
+  issueList: { marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 },
+  issue: {
+    padding: 12,
+    background: 'var(--surface-2)',
+    border: '1px solid var(--border)',
+    borderRadius: 10,
+  },
+  issueTop: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+    marginBottom: 6,
+  },
+  badge: {
+    fontSize: 9,
+    fontWeight: 700,
+    padding: '2px 8px',
+    borderRadius: 6,
+    letterSpacing: '0.05em',
+  },
+  badgeE: { background: 'rgba(248,113,113,0.12)', color: 'var(--error)' },
+  badgeW: { background: 'rgba(var(--warning-rgb),0.12)', color: 'var(--warning)' },
+  badgeI: { background: 'rgba(var(--success-rgb),0.12)', color: 'var(--success)' },
+  issueSrc: { fontSize: 9, color: 'var(--text-muted)', background: 'var(--elevated)', padding: '2px 6px', borderRadius: 4 },
+  issueCode: { fontSize: 9, color: 'var(--text-muted)', fontFamily: 'monospace' },
+  issueMod: { fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto', fontStyle: 'italic' },
+  issueMsg: { fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 },
+  issueSug: { marginTop: 4, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 },
+  noIssue: {
+    marginTop: 8,
+    padding: 14,
+    textAlign: 'center',
+    color: 'var(--success)',
+    fontSize: 12,
+    background: 'rgba(var(--success-rgb),0.06)',
+    borderRadius: 10,
+    fontWeight: 500,
+  },
+
+  // —— B 模型改写建议 · 采纳交互 ——
+  batchRow: {
+    marginTop: 10,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    padding: '9px 12px',
+    fontSize: 12,
+    color: 'var(--text-secondary)',
+    background: 'rgba(var(--accent-rgb),0.06)',
+    border: '1px solid var(--border)',
+    borderRadius: 10,
+  },
+  batchBtn: {
+    flexShrink: 0,
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--accent-text)',
+    background: 'var(--accent-gradient)',
+    border: 'none',
+    borderRadius: 8,
+    padding: '6px 14px',
+    cursor: 'pointer',
+  },
+  adoptedNote: {
+    marginTop: 6,
+    fontSize: 11,
+    color: 'var(--success)',
+    padding: '0 2px',
+  },
+  adoptWrap: { marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 },
+  adoptRow: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
+  adoptedTag: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--success)',
+    background: 'rgba(var(--success-rgb),0.1)',
+    borderRadius: 6,
+    padding: '3px 8px',
+  },
+  bulletMissNote: {
+    marginTop: 6,
+    padding: '6px 10px',
+    fontSize: 11,
+    lineHeight: 1.5,
+    color: 'var(--warning)',
+    background: 'rgba(var(--warning-rgb),0.12)',
+    border: '1px solid rgba(var(--warning-rgb),0.25)',
+    borderRadius: 8,
+  },
+  viewFixBtn: {
+    alignSelf: 'flex-start',
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--text)',
+    background: 'transparent',
+    border: '1px solid var(--accent)',
+    borderRadius: 8,
+    padding: '5px 12px',
+    cursor: 'pointer',
+  },
+  adoptConfirmBtn: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--accent-text)',
+    background: 'var(--accent-gradient)',
+    border: 'none',
+    borderRadius: 8,
+    padding: '6px 14px',
+    cursor: 'pointer',
+  },
+  undoBtn: {
+    fontSize: 11,
+    color: 'var(--text-muted)',
+    background: 'transparent',
+    border: '1px solid var(--border)',
+    borderRadius: 8,
+    padding: '5px 10px',
+    cursor: 'pointer',
+  },
+  linkBtn: {
+    fontSize: 11,
+    color: 'var(--text-secondary)',
+    background: 'transparent',
+    border: 'none',
+    padding: '4px 2px',
+    cursor: 'pointer',
+    textDecoration: 'underline',
+  },
+  diffWrap: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: 8,
+  },
+  diffCol: {
+    padding: 10,
+    background: 'var(--surface)',
+    border: '1px solid var(--border)',
+    borderRadius: 10,
+    minWidth: 0,
+  },
+  diffColNew: {
+    borderColor: 'rgba(var(--success-rgb),0.45)',
+    background: 'rgba(var(--success-rgb),0.05)',
+  },
+  diffHead: {
+    fontSize: 10,
+    fontWeight: 700,
+    letterSpacing: '0.05em',
+    color: 'var(--text-muted)',
+    marginBottom: 6,
+  },
+  diffTitle: { fontSize: 12, fontWeight: 700, color: 'var(--text-bright)', marginBottom: 4 },
+  diffBody: { fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.6 },
+  diffBullets: {
+    margin: '6px 0 0',
+    paddingLeft: 16,
+    fontSize: 11,
+    color: 'var(--text-secondary)',
+    lineHeight: 1.7,
+  },
+  diffDel: {
+    color: 'var(--error)',
+    background: 'rgba(var(--error-rgb),0.16)',
+    textDecoration: 'line-through',
+    borderRadius: 2,
+    padding: '0 1px',
+  },
+  diffAdd: {
+    color: 'var(--success)',
+    background: 'rgba(var(--success-rgb),0.18)',
+    borderRadius: 2,
+    padding: '0 1px',
+  },
+
+  // —— 提示词卡片 ——
+  promptList: { display: 'flex', flexDirection: 'column', gap: 12 },
+  promptCard: {
+    background: 'var(--surface)',
+    backdropFilter: 'blur(16px)',
+    WebkitBackdropFilter: 'blur(16px)',
+    border: '1px solid var(--border)',
+    borderRadius: 16,
+    overflow: 'hidden',
+    boxShadow: 'var(--shadow-sm)',
+    transition: 'box-shadow .2s',
+  },
+  pcHead: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '14px 18px',
+    borderBottom: '1px solid var(--border)',
+    background: 'var(--surface-2)',
+  },
+  pcLeft: { display: 'flex', alignItems: 'center', gap: 14 },
+  pcIndex: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: 2,
+  },
+  pcIndexNum: {
+    fontSize: 22,
+    fontWeight: 700,
+    background: 'var(--accent-gradient)',
+    WebkitBackgroundClip: 'text',
+    WebkitTextFillColor: 'transparent',
+    backgroundClip: 'text',
+    lineHeight: 1,
+  },
+  pcTitle: {
+    fontSize: 15,
+    fontWeight: 600,
+    color: 'var(--text-bright)',
+    margin: 0,
+    marginBottom: 2,
+  },
+  pcMeta: {
+    fontSize: 11,
+    color: 'var(--text-muted)',
+    display: 'flex',
+    gap: 6,
+  },
+  metaDot: { opacity: 0.5 },
+  copyBtn: {
+    fontSize: 12,
+    background: 'var(--surface-3)',
+    color: 'var(--text-muted)',
+    border: '1px solid var(--border)',
+    borderRadius: 8,
+    padding: '6px 12px',
+    cursor: 'pointer',
+    transition: 'all .2s',
+    fontWeight: 500,
+  },
+  pcTags: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 6,
+    padding: '10px 18px',
+  },
+  tag: {
+    fontSize: 11,
+    color: 'var(--text-muted)',
+    background: 'var(--surface-2)',
+    border: '1px solid var(--border)',
+    borderRadius: 6,
+    padding: '3px 8px',
+  },
+  promptText: {
+    margin: 0,
+    fontSize: 12.5,
+    lineHeight: 1.75,
+    color: 'var(--text-secondary)',
+    background: 'var(--surface-3)',
+    padding: '16px 18px',
+    borderTop: '1px solid var(--border)',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    fontFamily: '"JetBrains Mono", "Noto Sans SC", monospace',
+  },
+
+  // —— Toast ——
+  toast: {
+    position: 'fixed',
+    left: '50%',
+    bottom: 32,
+    transform: 'translateX(-50%)',
+    background: 'var(--surface)',
+    backdropFilter: 'blur(16px)',
+    WebkitBackdropFilter: 'blur(16px)',
+    color: 'var(--text)',
+    border: '1px solid var(--border-2)',
+    padding: '10px 20px',
+    borderRadius: 12,
+    fontSize: 13,
+    boxShadow: 'var(--shadow-lg)',
+    zIndex: 50,
+    fontWeight: 500,
+  },
+
+  // —— 生成失败持久错误条 ——
+  error: {
+    marginTop: 14,
+    padding: '12px 16px',
+    borderRadius: 12,
+    background: 'rgba(255, 80, 80, 0.12)',
+    border: '1px solid var(--danger, #e5484d)',
+    color: 'var(--text)',
+    fontSize: 13,
+    lineHeight: 1.6,
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+  },
+  errorHint: {
+    marginTop: 4,
+    fontSize: 12,
+    opacity: 0.7,
+  },
+
+  // —— 概念图谱 ——
+  graphSection: {
+    marginTop: 24,
+    padding: 20,
+    background: 'var(--surface)',
+    backdropFilter: 'blur(16px)',
+    WebkitBackdropFilter: 'blur(16px)',
+    border: '1px solid var(--border)',
+    borderRadius: 16,
+    boxShadow: 'var(--shadow-md)',
+  },
+  graphTitle: {
+    fontSize: 16,
+    fontWeight: 600,
+    color: 'var(--text-bright)',
+    margin: '0 0 16px 0',
+  },
+  moduleDetail: {
+    marginTop: 16,
+    padding: 16,
+    background: 'var(--surface-2)',
+    border: '1px solid var(--border)',
+    borderRadius: 12,
+  },
+  moduleDetailHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 12,
+  },
+  moduleDetailIcon: {
+    fontSize: 24,
+  },
+  moduleDetailTitle: {
+    fontSize: 14,
+    fontWeight: 600,
+    color: 'var(--text-bright)',
+  },
+  moduleDetailType: {
+    fontSize: 11,
+    color: 'var(--text-muted)',
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+  },
+  closeBtn: {
+    marginLeft: 'auto',
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    border: '1px solid var(--border)',
+    background: 'var(--surface-3)',
+    color: 'var(--text-muted)',
+    cursor: 'pointer',
+    fontSize: 16,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  moduleDetailBody: {
+    fontSize: 13,
+    color: 'var(--text-secondary)',
+    lineHeight: 1.7,
+    marginBottom: 12,
+  },
+  moduleDetailList: {
+    margin: 0,
+    paddingLeft: 18,
+    fontSize: 13,
+    color: 'var(--text-secondary)',
+  },
+  btnActive: {
+    background: 'var(--accent-soft)',
+    borderColor: 'var(--accent)',
+    color: 'var(--accent)',
+  },
 };
-
-const Spinner: React.FC = () => (
-  <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-  </svg>
-);
-
-export default App;

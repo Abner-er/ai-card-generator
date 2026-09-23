@@ -1,14 +1,91 @@
-@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&family=Noto+Sans+SC:wght@400;500;700&family=Ma+Shan+Zheng&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&display=swap');
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ========== 暗色主题（Soft Glass）========== */
+:root,
+[data-theme="dark"] {
+  --bg: #0f172a;
+  --bg-2: #0c1322;
+  --surface: rgba(30, 41, 59, 0.6);
+  --surface-2: rgba(51, 65, 85, 0.4);
+  --surface-3: rgba(15, 23, 42, 0.8);
+  --elevated: rgba(71, 85, 105, 0.3);
+  --border: rgba(148, 163, 184, 0.12);
+  --border-2: rgba(148, 163, 184, 0.18);
+  --rule: rgba(148, 163, 184, 0.1);
+  --text: #e2e8f0;
+  --text-bright: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-faint: #64748b;
+  --accent: #38bdf8;
+  --accent-2: #6366f1;
+  --accent-rgb: 56, 189, 248;
+  --accent-soft: rgba(56, 189, 248, 0.1);
+  --accent-text: #ffffff;
+  --accent-gradient: linear-gradient(135deg, #38bdf8 0%, #6366f1 100%);
+  --success: #34d399;
+  --success-rgb: 52, 211, 153;
+  --warning: #fbbf24;
+  --warning-rgb: 251, 191, 36;
+  --error: #f87171;
+  --error-rgb: 248, 113, 113;
+  --glow-1: rgba(56, 189, 248, 0.08);
+  --glow-2: rgba(99, 102, 241, 0.06);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.2);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.25);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.35);
+  --shadow-glow: 0 0 32px rgba(56, 189, 248, 0.1);
+  --toast-border: rgba(148, 163, 184, 0.2);
+  color-scheme: dark;
+}
+
+/* ========== 亮色主题 ========== */
+[data-theme="light"] {
+  --bg: #f8fafc;
+  --bg-2: #f1f5f9;
+  --surface: rgba(255, 255, 255, 0.85);
+  --surface-2: rgba(255, 255, 255, 0.7);
+  --surface-3: rgba(248, 250, 252, 0.9);
+  --elevated: rgba(255, 255, 255, 0.95);
+  --border: rgba(148, 163, 184, 0.15);
+  --border-2: rgba(148, 163, 184, 0.25);
+  --rule: rgba(148, 163, 184, 0.12);
+  --text: #334155;
+  --text-bright: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+  --accent: #0ea5e9;
+  --accent-2: #6366f1;
+  --accent-rgb: 14, 165, 233;
+  --accent-soft: rgba(14, 165, 233, 0.08);
+  --accent-text: #ffffff;
+  --accent-gradient: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
+  --success: #10b981;
+  --success-rgb: 16, 185, 129;
+  --warning: #f59e0b;
+  --warning-rgb: 245, 158, 11;
+  --error: #ef4444;
+  --error-rgb: 239, 68, 68;
+  --glow-1: rgba(14, 165, 233, 0.05);
+  --glow-2: rgba(99, 102, 241, 0.04);
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 8px 32px rgba(15, 23, 42, 0.1);
+  --shadow-glow: 0 0 24px rgba(14, 165, 233, 0.08);
+  --toast-border: rgba(148, 163, 184, 0.2);
+  color-scheme: light;
+}
+
 :root {
-  font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: "DM Sans", "Noto Sans SC", "PingFang SC", sans-serif;
   line-height: 1.6;
-  color: #2c2c2c;
-  background-color: #f5f5f5;
+  color: var(--text);
+  background-color: var(--bg);
 }
 
 * {
@@ -19,20 +96,91 @@
 
 body {
   min-height: 100vh;
+  background: var(--bg);
+  background-image:
+    radial-gradient(ellipse 50% 40% at 10% 0%, var(--glow-1), transparent),
+    radial-gradient(ellipse 40% 35% at 90% 10%, var(--glow-2), transparent);
+  background-attachment: fixed;
+  transition: background-color .3s ease;
 }
 
-/* 卡片预览区滚动条美化 */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+[data-theme="dark"] body {
+  position: relative;
 }
-::-webkit-scrollbar-track {
-  background: transparent;
+
+[data-theme="dark"] body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)' opacity='0.02'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 0;
 }
+
+::selection {
+  background: rgba(var(--accent-rgb), 0.25);
+  color: var(--accent-text);
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: #c0c0c0;
+  background: var(--border-2);
   border-radius: 3px;
+  transition: background .2s;
 }
-::-webkit-scrollbar-thumb:hover {
-  background: #a0a0a0;
+::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+.stagger > * {
+  animation: fadeInUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+}
+.stagger > *:nth-child(1) { animation-delay: 0.04s; }
+.stagger > *:nth-child(2) { animation-delay: 0.10s; }
+.stagger > *:nth-child(3) { animation-delay: 0.16s; }
+.stagger > *:nth-child(4) { animation-delay: 0.22s; }
+.stagger > *:nth-child(5) { animation-delay: 0.28s; }
+.stagger > *:nth-child(6) { animation-delay: 0.34s; }
+.stagger > *:nth-child(7) { animation-delay: 0.40s; }
+.stagger > *:nth-child(8) { animation-delay: 0.46s; }
+.stagger > *:nth-child(n+9) { animation-delay: 0.52s; }
+
+.fade-in { animation: fadeInUp 0.45s cubic-bezier(0.16, 1, 0.3, 1); }
+
+textarea:focus { outline: none; }
+button:focus { outline: none; }
+button { font-family: inherit; }
+
+/* 玻璃卡片通用效果 */
+.glass {
+  background: var(--surface);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+}
+
+/* 渐变文字 */
+.gradient-text {
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.font-mono {
+  font-family: "JetBrains Mono", "Noto Sans SC", monospace;
 }

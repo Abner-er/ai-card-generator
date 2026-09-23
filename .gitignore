@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 .env
+settings.json
+
+# Temporary build outputs / verification artifacts
+.gen-build
+.gen-*
+.workbuddy/*.png
+.workbuddy/verify-*
 
 # Editor directories and files
 .vscode/*
