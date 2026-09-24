@@ -5,7 +5,8 @@
  *  - server 模式（dev）：路径原样发出，由 vite dev server 反代并注入 Key（行为与之前完全一致）。
  *  - local 模式（静态部署，如 GitHub Pages）：把 /ai-api、/ai-check-api、/ai-qwen、/ai-sensenova
  *    前缀翻译成真实端点 URL，并从 localStorage 取 Key 注入 Authorization 头。
- *    端点 CORS 实测均放行浏览器直调（allow-origin: *）。
+ *    注意：部分端点（如 NVIDIA integrate.api.nvidia.com）不返回 CORS 头，浏览器直连会被拦截。
+ *    遇到 CORS 时需换用支持浏览器跨域的端点，或在本地用 npm run dev（走服务端代理无此问题）。
  *
  * 所有原本 fetch('/ai-…') 的调用点一律改走 gatewayFetch，保证两种模式行为一致。
  */

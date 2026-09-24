@@ -668,14 +668,15 @@ function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boolean) =
 
 function TestResultView({ r }: { r: TestResult | null }) {
   if (!r) return null;
+  const noteSuffix = r.note ? ` · ${r.note}` : '';
   if (r.ok) {
     return (
       <span style={S.testOk}>
-        ✓ 通过 {r.latencyMs ? `（${r.latencyMs}ms）` : ''}{r.note ? ` · ${r.note}` : ''}
+        ✓ 通过 {r.latencyMs ? `（${r.latencyMs}ms）` : ''}{noteSuffix}
       </span>
     );
   }
-  return <span style={S.testFail}>✗ {r.error}</span>;
+  return <span style={S.testFail}>✗ {r.error}{noteSuffix}</span>;
 }
 
 /* ---------------- 样式 ---------------- */

@@ -553,6 +553,18 @@ async function gatewayFetch(url: string, init: RequestInit): Promise<Response> {
   return g.gatewayFetch(url, init);
 }
 
+/**
+ * 浏览器 fetch 被 CORS 拦截或网络不可达时，抛出的通常是 TypeError "Failed to fetch"。
+ * 原始消息对用户毫无诊断价值，这里识别并替换成可读说明。
+ */
+function formatFetchError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) {
+    return '网络请求失败（可能被 CORS 拦截）：该端点不支持浏览器直连。本地模式（GitHub Pages）下浏览器直接请求 API，需端点返回 CORS 头。请换用支持 CORS 的端点，或在本地用 npm run dev 测试。';
+  }
+  return msg;
+}
+
 /** local 模式文本模型实测：最小请求验证端点 + Key 可用 */
 async function probeChat(path: string, model: string): Promise<TestResult> {
   const t0 = performance.now();
@@ -572,7 +584,7 @@ async function probeChat(path: string, model: string): Promise<TestResult> {
     }
     return { ok: true, latencyMs, model };
   } catch (e) {
-    return { ok: false, error: String(e instanceof Error ? e.message : e) };
+    return { ok: false, error: formatFetchError(e) };
   }
 }
 
@@ -589,7 +601,12 @@ export async function testTextModel(): Promise<TestResult> {
 /** B 模型（质检）连通性测试：server 走 /ai-check-api 同源配置；local 直连实测 */
 export async function testCheckModel(): Promise<TestResult> {
   if (currentMode !== 'server') {
-    return probeChat('/ai-check-api/chat/completions', current.text.checkModel || current.text.model);
+    const usingFallback = !currentProxy.checkBaseUrl;
+    const result = await probeChat('/ai-check-api/chat/completions', current.text.checkModel || current.text.model);
+    if (usingFallback) {
+      result.note = '质检端点留空，使用生成端点';
+    }
+    return result;
   }
   try {
     const resp = await fetch('/__settings/test/check', { method: 'POST' });
@@ -620,7 +637,7 @@ export async function testImageModel(): Promise<TestResult> {
       // 400/422 等参数类错误反而说明请求已到达服务端且通过鉴权
       return { ok: true, latencyMs, note: '本地模式仅验证端点可达与 Key 鉴权，未真实出图' };
     } catch (e) {
-      return { ok: false, error: String(e instanceof Error ? e.message : e) };
+      return { ok: false, error: formatFetchError(e) };
     }
   }
   try {
