@@ -41,7 +41,7 @@ import AdminView from './AdminView';
 // pdfjs 主体懒加载（见 extractPDF），worker 是独立静态资源、不增加主 bundle
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import StepErrorBoundary from './StepErrorBoundary';
-import { getSettings, loadRuntimeSettings, saveRuntimeSettings, subscribe } from './blocks/settings';
+import { getSettings, loadRuntimeSettings, saveRuntimeSettings, subscribe, isConfigured } from './blocks/settings';
 import { getImageProvider } from './blocks/imageProvider';
 
 type Step = 'input' | 'prompts' | 'study' | 'quiz' | 'export' | 'admin' | 'learn';
@@ -133,6 +133,9 @@ export default function App() {
   const [loadedFile, setLoadedFile] = useState<{ name: string; chars: number; truncated: boolean; preview: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const prevStepRef = useRef<Step>('input');
+  /** hashchange 监听器只注册一次，闭包读不到最新 step，用 ref 兜住 */
+  const stepRef = useRef<Step>(step);
+  stepRef.current = step;
   // 复习范围：undefined = 全局到期队列；字符串 = 只复习该系列（组内入口）
   const [studyScope, setStudyScope] = useState<string | undefined>(undefined);
   // 闪卡 id 的生成批次前缀：模块 id 是 m1/m2… 序号，跨系列必然重复，
@@ -192,6 +195,26 @@ export default function App() {
     document.title = appSubtitle ? `${appName} · ${appSubtitle}` : appName;
   }, [appName, appSubtitle]);
 
+  // 后台入口：开放部署下导航栏不放按钮，通过地址栏 #/admin 进入。
+  // 注意这只是把入口藏起来，不是权限控制——任何人都能敲这个地址。
+  useEffect(() => {
+    const isAdminHash = () => window.location.hash.replace(/^#\/?/, '').toLowerCase() === 'admin';
+    const sync = () => {
+      if (isAdminHash()) {
+        if (stepRef.current !== 'admin') {
+          prevStepRef.current = stepRef.current;
+          setStep('admin');
+        }
+      } else if (stepRef.current === 'admin') {
+        // 浏览器后退或手动清掉 hash：退回进入前那一步
+        setStep(prevStepRef.current === 'admin' ? 'input' : prevStepRef.current);
+      }
+    };
+    sync();
+    window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
+
   // 切换步骤时回到顶部：否则从长页面底部跳转后，新步骤顶部的「← 返回」按钮会被滚出视口，
   // 用户看不到返回入口、误以为"回不去"，只能手动刷新（历史 bug）
   useEffect(() => {
@@ -224,6 +247,14 @@ export default function App() {
       ? (pages.length > 0 ? 'prompts' : 'input')
       : prevStepRef.current;
     setStep(target);
+  };
+
+  /** 退出后台：顺手清掉 #/admin，否则下次刷新又被弹回后台 */
+  const exitAdmin = () => {
+    if (window.location.hash) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+    backStep();
   };
 
   // 学习页是复习的延伸阅读，步骤条上归入「复习」一格
@@ -696,9 +727,6 @@ export default function App() {
               📦 批量导出
             </button>
           )}
-          <button style={S.iconBtn} onClick={() => gotoStep('admin')} title="后台管理">
-            ⚙️
-          </button>
           <button style={S.iconBtn} onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} title="切换主题">
             {theme === 'dark' ? '☀️' : '🌙'}
           </button>
@@ -735,6 +763,15 @@ export default function App() {
               <h2 style={S.h2}>输入知识内容</h2>
               <p style={S.h2desc}>输入主题、粘贴文本、上传文件或 URL，AI 自动拆解为结构化模块并生成闪卡</p>
             </div>
+
+            {/* 开放部署兜底：这个实例还没配模型通道时，别让访客一路点下去撞上裸报错 */}
+            {!isConfigured() && (
+              <div style={S.setupNotice}>
+                <b style={S.setupNoticeTitle}>这个部署还没配置模型通道</b>
+                当前实例的模型端点与密钥都未设置，生成会直接失败。
+                如果你是部署者：按 README 配置构建环境变量重新部署，或在地址栏访问 <b>#/admin</b> 手动填写。
+              </div>
+            )}
 
             {/* 输入方式切换 */}
             <div style={S.inputTypeSwitch}>
@@ -1149,7 +1186,7 @@ export default function App() {
         )}
 
         {step === 'admin' && (
-          <AdminView onBack={backStep} onToast={showToast} />
+          <AdminView onBack={exitAdmin} onToast={showToast} />
         )}
         </StepErrorBoundary>
       </main>
@@ -2518,6 +2555,22 @@ const S: Record<string, React.CSSProperties> = {
     lineHeight: 1.6,
     whiteSpace: 'pre-wrap',
     wordBreak: 'break-word',
+  },
+  setupNotice: {
+    marginBottom: 18,
+    padding: '14px 16px',
+    borderRadius: 12,
+    border: '1px solid rgba(var(--warning-rgb), 0.35)',
+    background: 'rgba(var(--warning-rgb), 0.08)',
+    fontSize: 13,
+    lineHeight: 1.75,
+    color: 'var(--text-secondary)',
+  },
+  setupNoticeTitle: {
+    display: 'block',
+    marginBottom: 4,
+    fontSize: 13.5,
+    color: 'var(--text-bright)',
   },
   errorHint: {
     marginTop: 4,

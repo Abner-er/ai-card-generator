@@ -1,8 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import {
-  exportConfig, importConfig, getSettings, resetSettings,
-  CONFIG_BUNDLE_VERSION, DEFAULT_APP_NAME,
-} from './settings';
+import { exportConfig, importConfig, getSettings, resetSettings, saveKeys, isConfigured, CONFIG_BUNDLE_VERSION, DEFAULT_APP_NAME } from './settings';
 
 describe('配置导出 / 导入', () => {
   beforeEach(async () => {
@@ -106,5 +103,33 @@ describe('配置导出 / 导入', () => {
     const after = exportConfig();
     expect(after.proxy.proxyToken).toBe('');
     expect(after.proxy.textBaseUrl).toBe('https://api.agnes-ai.cn/v1');
+  });
+});
+
+describe('部署可用性判定 isConfigured', () => {
+  beforeEach(async () => {
+    await resetSettings();
+    // resetSettings 有意不动 API Key（弹窗承诺「API Key 不受影响」），
+    // 这里显式清空，避免上个用例的 Key 串进来
+    await saveKeys({ agnes: '', dashscope: '', check: '', sensenova: '' });
+  });
+
+  it('既没 Key 也没口令 → 未配置，访客应看到引导', () => {
+    expect(isConfigured()).toBe(false);
+  });
+
+  it('配了代理口令 → 已配置（Key 在代理上，浏览器无需持有）', async () => {
+    await importConfig({ settings: { app: { name: 'x' } }, proxy: { proxyToken: 'tok' } });
+    expect(isConfigured()).toBe(true);
+  });
+
+  it('只配了任意一个 API Key → 已配置', async () => {
+    await saveKeys({ agnes: 'sk-x' });
+    expect(isConfigured()).toBe(true);
+  });
+
+  it('口令为纯空白不算已配置', async () => {
+    await importConfig({ settings: { app: { name: 'x' } }, proxy: { proxyToken: '   ' } });
+    expect(isConfigured()).toBe(false);
   });
 });

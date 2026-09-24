@@ -193,14 +193,18 @@ function deepMerge<T extends Record<string, any>>(base: T, patch: any): T {
 
 let current: AppSettings = structuredCloneSafe(ENV_DEFAULTS);
 let currentMode: SettingsMode = 'local';
-const DEFAULT_PROXY: ProxySettings = {
-  textBaseUrl: 'https://api.agnes-ai.cn/v1',
-  dashBaseUrl: 'https://dashscope.aliyuncs.com',
-  checkBaseUrl: '',
-  sensenovaBaseUrl: 'https://token.sensenova.cn/v1',
-  proxyToken: '',
+/**
+ * 端点默认值：部署者通过 .env / 构建环境变量注入，构建后即为访客的开箱默认值。
+ * 未注入时回退到公共端点。见 .env.example。
+ */
+const ENV_PROXY: ProxySettings = {
+  textBaseUrl: import.meta.env.VITE_TEXT_BASE_URL || 'https://api.agnes-ai.cn/v1',
+  dashBaseUrl: import.meta.env.VITE_DASH_BASE_URL || 'https://dashscope.aliyuncs.com',
+  checkBaseUrl: import.meta.env.VITE_CHECK_BASE_URL || '',
+  sensenovaBaseUrl: import.meta.env.VITE_SENSENOVA_BASE_URL || 'https://token.sensenova.cn/v1',
+  proxyToken: import.meta.env.VITE_PROXY_TOKEN || '',
 };
-let currentProxy: ProxySettings = { ...DEFAULT_PROXY };
+let currentProxy: ProxySettings = { ...ENV_PROXY };
 const listeners = new Set<() => void>();
 
 function structuredCloneSafe<T>(v: T): T {
@@ -234,6 +238,17 @@ export function authErrorHint(): string {
     return '代理口令可能不对，或代理侧保管的 API Key 已失效（需在代理的环境变量里更新）';
   }
   return '请在「后台管理 ⚙」中填写并保存 API Key';
+}
+
+/**
+ * 当前部署是否已具备可用的模型通道。
+ * 开放部署下访客不该看到裸报错，用这个判断是否要展示引导。
+ * server 模式由服务端持 Key，恒为已配置。
+ */
+export function isConfigured(): boolean {
+  if (currentMode === 'server') return true;
+  if ((currentProxy.proxyToken || '').trim()) return true;
+  return KEY_FIELDS.some((k) => !!localKeys[k]);
 }
 
 export function subscribe(fn: () => void): () => void {
@@ -426,7 +441,7 @@ export async function resetSettings(): Promise<SaveResult> {
   }
   current = structuredCloneSafe(ENV_DEFAULTS);
   // 端点里可能存着代理口令这类凭证，恢复默认必须一起清掉，否则会静默残留
-  currentProxy = { ...DEFAULT_PROXY };
+  currentProxy = { ...ENV_PROXY };
   try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ }
   try { localStorage.removeItem(LS_KEYS_PROXY); } catch { /* ignore */ }
   emit();

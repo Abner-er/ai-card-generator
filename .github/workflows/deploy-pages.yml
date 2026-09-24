@@ -28,7 +28,23 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx vitest run
+      # 部署者在仓库 Settings → Secrets and variables → Actions → Variables 里配置这些，
+      # 构建期注入前端产物。未设置的会展开成空字符串，代码里用 || 回退到默认值。
+      # 见 .env.example
       - run: npm run build
+        env:
+          VITE_APP_NAME: ${{ vars.VITE_APP_NAME }}
+          VITE_APP_SUBTITLE: ${{ vars.VITE_APP_SUBTITLE }}
+          VITE_TEXT_BASE_URL: ${{ vars.VITE_TEXT_BASE_URL }}
+          VITE_DASH_BASE_URL: ${{ vars.VITE_DASH_BASE_URL }}
+          VITE_CHECK_BASE_URL: ${{ vars.VITE_CHECK_BASE_URL }}
+          VITE_SENSENOVA_BASE_URL: ${{ vars.VITE_SENSENOVA_BASE_URL }}
+          VITE_PROXY_TOKEN: ${{ vars.VITE_PROXY_TOKEN }}
+          VITE_TEXT_MODEL: ${{ vars.VITE_TEXT_MODEL }}
+          VITE_CHECK_MODEL: ${{ vars.VITE_CHECK_MODEL }}
+          VITE_EXTRACT_MODEL: ${{ vars.VITE_EXTRACT_MODEL }}
+          VITE_QWEN_MODEL: ${{ vars.VITE_QWEN_MODEL }}
+          VITE_USE_MOCK: ${{ vars.VITE_USE_MOCK }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

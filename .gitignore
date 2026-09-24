@@ -20,6 +20,19 @@ settings.json
 .workbuddy/*.png
 .workbuddy/verify-*
 
+# 根目录的一次性验证脚本（无任何构建/运行引用）
+verify*.mjs
+verify*.cjs
+verify*.py
+test-prompt.js
+test-agnes-proxy.json
+
+# 归档的 Android 项目：只保留源码，编译产物与 Gradle 缓存不入库
+_archive/**/build/
+_archive/**/.gradle/
+# 含本机 SDK 绝对路径，因机器而异
+_archive/**/local.properties
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

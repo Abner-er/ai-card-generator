@@ -36,7 +36,7 @@ interface GatewayConfig {
   image: { providerId: 'qwen' | 'sensenova'; model: string; promptExtend: boolean; maxRetries: number; retryBackoffMs: number };
   study: { initialEase: number; minEase: number; easyBonus: number };
   quiz: { defaultCount: number; defaultDifficulty: 'easy' | 'medium' | 'hard' };
-  proxy: { textBaseUrl: string; dashBaseUrl: string; checkBaseUrl: string; sensenovaBaseUrl: string };
+  proxy: { textBaseUrl: string; dashBaseUrl: string; checkBaseUrl: string; sensenovaBaseUrl: string; proxyToken: string };
   keys: { agnes: string; dashscope: string; check: string; sensenova: string };
 }
 
@@ -280,10 +280,11 @@ function aiGatewayPlugin(): Plugin {
         study: { initialEase: 2.5, minEase: 1.3, easyBonus: 1.3 },
         quiz: { defaultCount: 10, defaultDifficulty: 'medium' },
         proxy: {
-          textBaseUrl: 'https://api.agnes-ai.cn/v1',
-          dashBaseUrl: env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com',
+          textBaseUrl: env.VITE_TEXT_BASE_URL || 'https://api.agnes-ai.cn/v1',
+          dashBaseUrl: env.VITE_DASH_BASE_URL || env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com',
           checkBaseUrl: env.VITE_CHECK_BASE_URL || '',
-          sensenovaBaseUrl: env.SENSENOVA_BASE_URL || 'https://token.sensenova.cn/v1',
+          sensenovaBaseUrl: env.VITE_SENSENOVA_BASE_URL || env.SENSENOVA_BASE_URL || 'https://token.sensenova.cn/v1',
+          proxyToken: env.VITE_PROXY_TOKEN || '',
         },
         keys: {
           agnes: env.AGNES_API_KEY || '',
@@ -570,11 +571,28 @@ function imageProxyPlugin(): Plugin {
 }
 
 // https://vitejs.dev/config/
-export default defineConfig(() => {
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '');
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const appName = env.VITE_APP_NAME || '提示词工坊';
+  const appSubtitle = env.VITE_APP_SUBTITLE || 'Knowledge Card Prompt Workshop';
   return {
     // GitHub Pages 项目页部署在 /<repo>/ 子路径下；SPA 无路由 history 依赖，
     // 用相对路径 base 一次构建通吃根域/子路径/本地 file 预览
     base: './',
-    plugins: [react(), aiGatewayPlugin(), imageProxyPlugin()],
+    plugins: [
+      react(),
+      aiGatewayPlugin(),
+      imageProxyPlugin(),
+      {
+        // index.html 的 title 是静态的，App 要到运行时才覆盖它。
+        // 这里让部署者配的 VITE_APP_NAME 从首屏就生效，避免先闪一下默认标题。
+        // 格式与 App.tsx 的 document.title 保持一致。
+        name: 'inject-app-title',
+        transformIndexHtml(html: string) {
+          return html.replace(/<title>[\s\S]*?<\/title>/, `<title>${esc(appName)} · ${esc(appSubtitle)}</title>`);
+        },
+      },
+    ],
   };
 });
