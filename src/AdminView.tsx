@@ -54,6 +54,7 @@ interface Draft {
   dashBaseUrl: string;
   checkBaseUrl: string;
   senBaseUrl: string;
+  proxyToken: string;
   keyAgnes: string;
   keyDash: string;
   keyCheck: string;
@@ -104,6 +105,7 @@ function draftFromSettings(): Draft {
     dashBaseUrl: getProxy().dashBaseUrl,
     checkBaseUrl: getProxy().checkBaseUrl,
     senBaseUrl: getProxy().sensenovaBaseUrl,
+    proxyToken: getProxy().proxyToken,
     keyAgnes: '',
     keyDash: '',
     keyCheck: '',
@@ -203,6 +205,8 @@ export default function AdminView({ onBack, onToast }: Props) {
         ...(draft.senBaseUrl.trim() ? { sensenovaBaseUrl: draft.senBaseUrl.trim() } : {}),
         // checkBaseUrl 允许清空（清空 = 回退 A 端点），故始终回传
         checkBaseUrl: draft.checkBaseUrl.trim(),
+        // 口令允许清空（清空 = 关闭代理托管），故始终回传
+        proxyToken: draft.proxyToken.trim(),
       });
     }
     if (res.ok && Object.keys(keysPayload).length) {
@@ -219,7 +223,7 @@ export default function AdminView({ onBack, onToast }: Props) {
   };
 
   const handleReset = async () => {
-    if (!window.confirm('确认恢复默认配置？API Key 不受影响。')) return;
+    if (!window.confirm('确认恢复默认配置？端点与代理口令会一并重置，API Key 不受影响。')) return;
     const res = await resetSettings();
     if (res.ok) {
       setDraft(draftFromSettings());
@@ -233,7 +237,12 @@ export default function AdminView({ onBack, onToast }: Props) {
 
   const handleExport = () => {
     const bundle = exportConfig();
-    if (bundle.hasKeys && !window.confirm('导出的配置文件包含明文 API Key。\n请只保存在可信位置，不要上传到网盘、聊天工具或代码仓库。\n\n继续导出？')) return;
+    const secrets: string[] = [];
+    if (bundle.hasKeys) secrets.push('明文 API Key');
+    if (bundle.proxy.proxyToken) secrets.push('代理口令');
+    if (secrets.length && !window.confirm(
+      `导出的配置文件包含${secrets.join('和')}。\n请只保存在可信位置，不要上传到网盘、聊天工具或代码仓库。\n\n继续导出？`,
+    )) return;
     const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const d = new Date();
@@ -243,7 +252,7 @@ export default function AdminView({ onBack, onToast }: Props) {
     a.download = `prompt-workshop-config-${stamp}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    onToast(bundle.hasKeys ? '配置已导出（含 API Key）' : '配置已导出（不含 API Key）');
+    onToast(secrets.length ? `配置已导出（含${secrets.join('和')}）` : '配置已导出（不含密钥）');
   };
 
   const handleImportFile = async (file: File) => {
@@ -307,6 +316,8 @@ export default function AdminView({ onBack, onToast }: Props) {
         <div style={S.notice}>
           当前为静态部署模式：API Key 只保存在<b>本浏览器</b>（localStorage），请求由浏览器直连各服务商，
           不经过任何服务器；清除浏览器数据会丢失 Key，需重新填写。开发时可用 <code style={S.code}>npm run dev</code> 切回服务端模式。
+          若不想把 Key 放在浏览器里（例如要把应用分享给别人），可把端点指向自建 CORS 代理并在下方填「代理口令」，
+          Key 由代理保管并注入，浏览器只带口令。
         </div>
       )}
 
@@ -397,7 +408,7 @@ export default function AdminView({ onBack, onToast }: Props) {
             <Field label="请求端点（Base URL）">
               <input style={S.input} value={draft.textBaseUrl} onChange={(e) => set('textBaseUrl', e.target.value)} placeholder="https://api.agnes-ai.cn/v1" />
             </Field>
-            <Field label={isServer ? 'API Key（服务端保管）' : 'API Key（仅存本浏览器）'} hint="主端点 Key，生成与提取共用">
+            <Field label={isServer ? 'API Key（服务端保管）' : 'API Key（仅存本浏览器）'} hint="主端点 Key，生成与提取共用；配了代理口令可留空">
               <div style={S.keyRow}>
                 <input
                   style={S.input}
@@ -432,7 +443,7 @@ export default function AdminView({ onBack, onToast }: Props) {
             <Field label="质检端点（Base URL）" hint="留空 = 用生成端点">
               <input style={S.input} value={draft.checkBaseUrl} onChange={(e) => set('checkBaseUrl', e.target.value)} placeholder="https://api-inference.modelscope.cn/v1" />
             </Field>
-            <Field label="质检 API Key" hint="独立端点对应的 Key">
+            <Field label="质检 API Key" hint="独立端点对应的 Key；配了代理口令可留空">
               <div style={S.keyRow}>
                 <input
                   style={S.input}
@@ -469,6 +480,32 @@ export default function AdminView({ onBack, onToast }: Props) {
             </Field>
           </div>
         </div>
+      </section>
+
+      {/* ============ 端点托管 ============ */}
+      <section style={S.section}>
+        <div style={S.secHead}>
+          <h3 style={S.secTitle}>🔐 端点托管（可选）</h3>
+          <span style={S.secHint}>Key 存在自建代理上，浏览器不持有</span>
+        </div>
+        <div style={S.grid}>
+          <Field label="代理口令" hint="填了之后，下方各 API Key 可以全部留空">
+            <input
+              style={S.input}
+              type="password"
+              autoComplete="off"
+              value={draft.proxyToken}
+              onChange={(e) => set('proxyToken', e.target.value)}
+              placeholder="留空 = 不使用代理托管"
+            />
+          </Field>
+        </div>
+        <p style={S.gridHint}>
+          端点指向自建 CORS 代理（如 Lambda / Worker）且 Key 配在代理上时，在这里填口令。
+          请求会带 <code style={S.code}>X-Proxy-Token</code> 供代理校验，代理校验通过后补上真实 Key——
+          因此把应用分享给别人，对方也用不到你的 Key，你还能随时在代理侧改 Key 或换口令。
+          口令只存本浏览器，随「导出配置」一起搬运。
+        </p>
       </section>
 
       {/* ============ 生图模型 ============ */}

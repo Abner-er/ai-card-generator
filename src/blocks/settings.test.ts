@@ -73,4 +73,38 @@ describe('配置导出 / 导入', () => {
     expect(getSettings().app.subtitle).toBe('sub');
     expect(getSettings().quiz.defaultCount).toBe(7);
   });
+
+  it('代理口令与代理端点随配置导出 / 导入往返一致', async () => {
+    const proxyUrl = 'https://p.example.com/https/api.agnes-ai.cn/v1';
+    await importConfig({
+      settings: { app: { name: '托管测试' } },
+      proxy: { proxyToken: 'tok-1', textBaseUrl: proxyUrl },
+    });
+    const b = exportConfig();
+    expect(b.proxy.proxyToken).toBe('tok-1');
+    expect(b.proxy.textBaseUrl).toBe(proxyUrl);
+
+    // 只改口令：端点应保持（saveProxy 是合并语义，不是整体替换）
+    await importConfig({ settings: { app: { name: '覆盖后' } }, proxy: { proxyToken: 'tok-2' } });
+    expect(exportConfig().proxy.proxyToken).toBe('tok-2');
+    expect(exportConfig().proxy.textBaseUrl).toBe(proxyUrl);
+  });
+
+  it('导入时非字符串的口令被丢弃，不写进配置', async () => {
+    await importConfig({ settings: { app: { name: 'x' } }, proxy: { proxyToken: { evil: 1 } } });
+    expect(exportConfig().proxy.proxyToken).toBe('');
+  });
+
+  it('恢复默认会清掉端点与代理口令，避免凭证静默残留', async () => {
+    await importConfig({
+      settings: { app: { name: 'x' } },
+      proxy: { proxyToken: 'tok-residue', textBaseUrl: 'https://p.example.com/https/a.cn/v1' },
+    });
+    expect(exportConfig().proxy.proxyToken).toBe('tok-residue');
+
+    await resetSettings();
+    const after = exportConfig();
+    expect(after.proxy.proxyToken).toBe('');
+    expect(after.proxy.textBaseUrl).toBe('https://api.agnes-ai.cn/v1');
+  });
 });

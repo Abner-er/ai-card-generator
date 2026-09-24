@@ -11,7 +11,7 @@
  * 未来要加其它模型，只要再实现一个 ImageProvider 并注册到 getImageProvider 即可。
  */
 import type { Ratio } from './types';
-import { getSettings } from './settings';
+import { getSettings, authErrorHint } from './settings';
 import { gatewayFetch } from './gateway';
 import { trimTitle } from './textUtil';
 
@@ -149,7 +149,7 @@ export class QwenImageProvider implements ImageProvider {
           throw new Error('Qwen 限流，请稍后重试');
         }
         if (resp.status === 401 || resp.status === 403) {
-          throw new Error('DashScope API Key 无效或未配置（请在 后台管理 ⚙ 中配置生图 Key）');
+          throw new Error(`DashScope 鉴权失败：${authErrorHint()}`);
         }
         if (!resp.ok) {
           const t = await resp.text().catch(() => '');
@@ -226,7 +226,7 @@ export class SensenovaImageProvider implements ImageProvider {
           throw new Error('SenseNova 限流，请稍后重试');
         }
         if (resp.status === 401 || resp.status === 403) {
-          throw new Error('SenseNova API Key 无效或未配置（请在 后台管理 ⚙ 中配置生图 Key）');
+          throw new Error(`SenseNova 鉴权失败：${authErrorHint()}`);
         }
         if (!resp.ok) {
           const t = await resp.text().catch(() => '');

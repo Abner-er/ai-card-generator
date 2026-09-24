@@ -8,6 +8,7 @@
  *  3. /ai-qwen 附带 X-DashScope-Async: disable（同步返回，对齐 dev 代理）
  *  4. Key 缺失显式抛错引导去「后台管理」，绝不静默发出无鉴权请求
  *  5. server 模式与非浏览器环境（node/CI）原样透传——业务测试仍可 stub fetch
+ *  6. 代理托管模式：配了口令则允许无 Key，请求带 X-Proxy-Token 且不带 Authorization
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
@@ -90,6 +91,86 @@ describe('gatewayFetch：local 模式（浏览器直连）', () => {
     const { gatewayFetch } = await import('./gateway');
     await gatewayFetch('/some/other/api', { method: 'GET' });
     expect(f.mock.calls[0][0]).toBe('/some/other/api');
+  });
+});
+
+/** /__settings 不可达 → 判定为 local 模式，同时让 localStorage 里的端点/口令配置生效 */
+function localModeFetch() {
+  return vi.fn(async (url: any, _init?: any) => {
+    if (String(url) === '/__settings') throw new Error('offline');
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+  });
+}
+
+/** 启动到 local 模式并返回 fetch spy（calls[0] 是 /__settings 探测） */
+async function bootLocal(storage: ReturnType<typeof fakeStorage>) {
+  stubBrowser(storage);
+  const f = localModeFetch();
+  vi.stubGlobal('fetch', f);
+  const s = await import('./settings');
+  await s.loadRuntimeSettings();
+  return f;
+}
+
+/** 取出发往 AI 端点的调用（跳过 /__settings 探测） */
+function aiCall(f: ReturnType<typeof localModeFetch>) {
+  return f.mock.calls.find((c) => !String(c[0]).startsWith('/__settings')) as [string, RequestInit];
+}
+
+describe('gatewayFetch：代理托管模式（Key 由代理注入）', () => {
+  it('配了口令、未配 Key：请求带 X-Proxy-Token，且不带 Authorization', async () => {
+    const f = await bootLocal(fakeStorage({
+      kb_app_proxy_v1: JSON.stringify({
+        textBaseUrl: 'https://proxy.example.workers.dev/https/api.agnes-ai.cn/v1',
+        proxyToken: 'tok-abc123',
+      }),
+    }));
+    const { gatewayFetch } = await import('./gateway');
+    await gatewayFetch('/ai-api/chat/completions', { method: 'POST', body: '{}' });
+    const [url, init] = aiCall(f);
+    expect(url).toBe('https://proxy.example.workers.dev/https/api.agnes-ai.cn/v1/chat/completions');
+    const h = new Headers(init.headers);
+    expect(h.get('x-proxy-token')).toBe('tok-abc123');
+    // 空 Bearer 会被代理当成无效凭证，必须完全不发这个头
+    expect(h.get('authorization')).toBeNull();
+  });
+
+  it('口令与 Key 同时存在：两者都发（代理侧会用自己的 Key 覆盖）', async () => {
+    const f = await bootLocal(fakeStorage({
+      kb_local_keys_v1: JSON.stringify({ agnes: 'sk-own' }),
+      kb_app_proxy_v1: JSON.stringify({ proxyToken: 'tok-abc123' }),
+    }));
+    const { gatewayFetch } = await import('./gateway');
+    await gatewayFetch('/ai-api/chat/completions', { method: 'POST', body: '{}' });
+    const h = new Headers(aiCall(f)[1].headers);
+    expect(h.get('authorization')).toBe('Bearer sk-own');
+    expect(h.get('x-proxy-token')).toBe('tok-abc123');
+  });
+
+  it('口令为纯空白视为未配置：仍然抛错，不放行无鉴权请求', async () => {
+    const f = await bootLocal(fakeStorage({
+      kb_app_proxy_v1: JSON.stringify({ proxyToken: '   ' }),
+    }));
+    const { gatewayFetch } = await import('./gateway');
+    await expect(gatewayFetch('/ai-api/chat/completions', { method: 'POST' })).rejects.toThrow(/未配置.*API Key/);
+    expect(aiCall(f)).toBeUndefined();
+  });
+
+  it('代理托管对生图链路同样生效（/ai-qwen 带口令且不带 Authorization）', async () => {
+    const f = await bootLocal(fakeStorage({
+      kb_app_proxy_v1: JSON.stringify({
+        dashBaseUrl: 'https://proxy.example.workers.dev/https/dashscope.aliyuncs.com',
+        proxyToken: 'tok-abc123',
+      }),
+    }));
+    const { gatewayFetch } = await import('./gateway');
+    await gatewayFetch('/ai-qwen/services/aigc/multimodal-generation/generation', { method: 'POST', body: '{}' });
+    const [url, init] = aiCall(f);
+    expect(url).toBe('https://proxy.example.workers.dev/https/dashscope.aliyuncs.com/services/aigc/multimodal-generation/generation');
+    const h = new Headers(init.headers);
+    expect(h.get('x-proxy-token')).toBe('tok-abc123');
+    expect(h.get('authorization')).toBeNull();
+    expect(h.get('x-dashscope-async')).toBe('disable');
   });
 });
 

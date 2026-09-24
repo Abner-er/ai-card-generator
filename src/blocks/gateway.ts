@@ -7,6 +7,9 @@
  *    前缀翻译成真实端点 URL，并从 localStorage 取 Key 注入 Authorization 头。
  *    注意：部分端点（如 NVIDIA integrate.api.nvidia.com）不返回 CORS 头，浏览器直连会被拦截。
  *    遇到 CORS 时需换用支持浏览器跨域的端点，或在本地用 npm run dev（走服务端代理无此问题）。
+ *  - local 模式 + 代理托管：端点指向自建 CORS 代理（Lambda / Worker），Key 存在代理上。
+ *    浏览器只带 X-Proxy-Token 口令，不带 Authorization，Key 永不进入浏览器。
+ *    详见 cors-proxy/ 目录。
  *
  * 所有原本 fetch('/ai-…') 的调用点一律改走 gatewayFetch，保证两种模式行为一致。
  */
@@ -104,7 +107,12 @@ export async function gatewayFetch(url: string, init: RequestInit = {}): Promise
   const proxy = getProxy();
   const keys = getLocalKeys();
   const key = route.key(keys);
-  if (!key) {
+  /**
+   * 代理托管模式：端点自带 Key 注入（Key 存在 Lambda / Worker 上，浏览器不持有）。
+   * 此时浏览器不要求配 Key，只带口令，由代理校验后补上真实 Authorization。
+   */
+  const proxyToken = (proxy.proxyToken || '').trim();
+  if (!key && !proxyToken) {
     const name = route.prefix === '/ai-api' ? 'agnes' : route.prefix === '/ai-check-api' ? (keys.check ? 'check' : 'agnes') : route.prefix === '/ai-qwen' ? 'dashscope' : 'sensenova';
     throw keyMissingError(name);
   }
@@ -112,7 +120,9 @@ export async function gatewayFetch(url: string, init: RequestInit = {}): Promise
   if (!base) throw new Error('端点（Base URL）未配置：请在「后台管理」本地模式下填写端点');
 
   const headers = new Headers(init.headers ?? {});
-  headers.set('Authorization', `Bearer ${key}`);
+  // Key 为空说明走代理托管，此时不能发空 Bearer，否则代理可能当成无效凭证拒掉
+  if (key) headers.set('Authorization', `Bearer ${key}`);
+  if (proxyToken) headers.set('X-Proxy-Token', proxyToken);
   for (const [k, v] of Object.entries(route.extraHeaders ?? {})) headers.set(k, v);
 
   return fetch(joinUrl(base, url.slice(route.prefix.length)), { ...init, headers });

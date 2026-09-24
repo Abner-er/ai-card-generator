@@ -45,6 +45,11 @@ export interface ProxySettings {
   checkBaseUrl: string;
   /** 商汤 SenseNova 生图端点 */
   sensenovaBaseUrl: string;
+  /**
+   * 代理口令：端点若由自建代理（Lambda / Worker）托管 API Key，在这里填口令。
+   * 填了它 → 浏览器不再要求填 Key，Key 由代理在服务端注入，请求带 X-Proxy-Token 供代理校验。
+   */
+  proxyToken: string;
 }
 export interface KeyStatus {
   set: boolean;
@@ -188,12 +193,14 @@ function deepMerge<T extends Record<string, any>>(base: T, patch: any): T {
 
 let current: AppSettings = structuredCloneSafe(ENV_DEFAULTS);
 let currentMode: SettingsMode = 'local';
-let currentProxy: ProxySettings = {
+const DEFAULT_PROXY: ProxySettings = {
   textBaseUrl: 'https://api.agnes-ai.cn/v1',
   dashBaseUrl: 'https://dashscope.aliyuncs.com',
   checkBaseUrl: '',
   sensenovaBaseUrl: 'https://token.sensenova.cn/v1',
+  proxyToken: '',
 };
+let currentProxy: ProxySettings = { ...DEFAULT_PROXY };
 const listeners = new Set<() => void>();
 
 function structuredCloneSafe<T>(v: T): T {
@@ -216,6 +223,17 @@ export function getMode(): SettingsMode {
 
 export function getProxy(): ProxySettings {
   return currentProxy;
+}
+
+/**
+ * 鉴权失败（401/403）时的修复指引。
+ * 代理托管模式下浏览器本来就没有 Key，让用户去后台管理填 Key 是错的，会白折腾。
+ */
+export function authErrorHint(): string {
+  if ((currentProxy.proxyToken || '').trim()) {
+    return '代理口令可能不对，或代理侧保管的 API Key 已失效（需在代理的环境变量里更新）';
+  }
+  return '请在「后台管理 ⚙」中填写并保存 API Key';
 }
 
 export function subscribe(fn: () => void): () => void {
@@ -407,7 +425,10 @@ export async function resetSettings(): Promise<SaveResult> {
     }
   }
   current = structuredCloneSafe(ENV_DEFAULTS);
+  // 端点里可能存着代理口令这类凭证，恢复默认必须一起清掉，否则会静默残留
+  currentProxy = { ...DEFAULT_PROXY };
   try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ }
+  try { localStorage.removeItem(LS_KEYS_PROXY); } catch { /* ignore */ }
   emit();
   return { ok: true };
 }
@@ -433,7 +454,7 @@ export interface ConfigBundle {
 
 const PAGE_POS_VALUES: PageBadgePos[] = ['tl', 'tc', 'tr', 'bl', 'bc', 'br'];
 const PAGE_FMT_VALUES: PageBadgeFormat[] = ['cn', 'slash', 'dot'];
-const PROXY_FIELDS: Array<keyof ProxySettings> = ['textBaseUrl', 'dashBaseUrl', 'checkBaseUrl', 'sensenovaBaseUrl'];
+const PROXY_FIELDS: Array<keyof ProxySettings> = ['textBaseUrl', 'dashBaseUrl', 'checkBaseUrl', 'sensenovaBaseUrl', 'proxyToken'];
 const KEY_FIELDS: Array<keyof LocalKeys> = ['agnes', 'dashscope', 'check', 'sensenova'];
 
 /** 导出当前配置。server 模式的 Key 在服务端，前端拿不到明文，故不含 keys */
@@ -576,7 +597,7 @@ async function probeChat(path: string, model: string): Promise<TestResult> {
     });
     const latencyMs = Math.round(performance.now() - t0);
     if (resp.status === 401 || resp.status === 403) {
-      return { ok: false, latencyMs, error: `鉴权失败（HTTP ${resp.status}）：API Key 无效或已过期` };
+      return { ok: false, latencyMs, error: `鉴权失败（HTTP ${resp.status}）：${authErrorHint()}` };
     }
     if (!resp.ok) {
       const txt = await resp.text().catch(() => '');
@@ -632,7 +653,7 @@ export async function testImageModel(): Promise<TestResult> {
       });
       const latencyMs = Math.round(performance.now() - t0);
       if (resp.status === 401 || resp.status === 403) {
-        return { ok: false, latencyMs, error: `鉴权失败（HTTP ${resp.status}）：生图 API Key 无效` };
+        return { ok: false, latencyMs, error: `鉴权失败（HTTP ${resp.status}）：${authErrorHint()}` };
       }
       // 400/422 等参数类错误反而说明请求已到达服务端且通过鉴权
       return { ok: true, latencyMs, note: '本地模式仅验证端点可达与 Key 鉴权，未真实出图' };
