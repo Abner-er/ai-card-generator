@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# python3 转发桩
+# 本机 PATH 里的 python3 是坏的 shim，这里指向真解释器（Windows 版 Python）。
+# 因为 Windows 版 Python 不认 MSYS 风格路径（/tmp/...、/d/...），
+# 所以这里用 cygpath 把「像路径的参数」转成 Windows 形式。
+# 注意：这只是本地测试环境的适配，CloudShell 是纯 Linux，不需要这层。
+export MSYS_NO_PATHCONV=1
+export MSYS2_ARG_CONV_EXCL='*'
+
+REAL="/c/Users/Administrator/AppData/Local/Programs/Python/Python310/python.exe"
+[ -x "$REAL" ] || { echo "找不到真 python: $REAL" >&2; exit 1; }
+
+args=()
+for a in "$@"; do
+  case "$a" in
+    /?*) args+=("$(cygpath -w "$a" 2>/dev/null || printf '%s' "$a")") ;;
+    *)   args+=("$a") ;;
+  esac
+done
+
+exec "$REAL" "${args[@]}"

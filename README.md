@@ -83,6 +83,30 @@ API Key 放在自建 CORS 代理上，由代理在服务端注入。访客打开
 | [`cors-proxy/lambda/index.js`](cors-proxy/lambda/index.js) | AWS Lambda Function URL | 文件头有完整部署步骤 |
 | [`cors-proxy/worker.js`](cors-proxy/worker.js) | Cloudflare Worker | 免费、五分钟搭好 |
 
+### 一键部署 Lambda（AWS CloudShell）
+
+懒得照着控制台一步步点，就用 `cors-proxy/deploy.sh`。在 CloudShell 里：
+
+```bash
+cd cors-proxy
+./deploy.sh
+```
+
+脚本依次建 IAM 角色、打包上传函数、写环境变量、开 Function URL、补公网访问策略，最后把端点、口令和一条 curl 自测命令打出来。中途要填的 Key 直接回车跳过，之后在控制台补也行。
+
+```bash
+./deploy.sh my-proxy                            # 自定义函数名
+./deploy.sh my-proxy mySecretToken              # 函数名 + 口令
+KEY_AGNES=sk-xxx KEY_CHECK=ms-xxx ./deploy.sh   # 环境变量预置 Key，跳过交互
+```
+
+几个要留意的点：
+
+- **能重复跑。** 角色 / 函数 / URL 已存在就走更新分支。重跑不传口令会沿用已部署的，不传 Key 也不会把已配的 Key 抹掉——所以改完 `lambda/index.js` 直接重跑就行，前端不用动。
+- **默认 `nodejs24.x` + arm64。** 已有的函数如果还停在旧运行时，重跑会顺手升上去。要指定就 `RUNTIME=nodejs22.x ./deploy.sh`。（`nodejs20.x` 已于 2026-04-30 停止支持，别用。）
+- **区域取 `AWS_REGION`。** CloudShell 默认跟控制台右上角一致，跑之前先确认选对了。
+- 首次跑完把打出来的端点和口令填进应用后台（`#/admin`），或配到 GitHub Variables，再手动触发一次 Deploy Pages。
+
 端点写法是把真实地址拼在代理地址后面：
 
 ```
@@ -128,6 +152,16 @@ ALLOWED_ORIGINS  可选，逗号分隔。填了就只允许这些来源调用
 ### 静态约定扫描
 
 `src/blocks/conventions.test.ts` 是个棘轮测试：每条规则对应一个历史缺陷，只扫写法不测行为。任何人重新引入同类写法，`npm run check` 直接红。目前覆盖中文数字数、标题截断、catch 后静默降级假内容、提示词吞掉风格参数、自检采纳断层。
+
+### 部署脚本的回归测试
+
+`cors-proxy/deploy.sh` 改完跑一遍这个，不碰真实 AWS——用假 aws cli + 真 python3 走 8 个场景：全新部署、重跑幂等、只换一个 Key、交互重填 Key、无口令自动生成、区域缺失报错、创建失败重试后成功、创建一直失败打原始报错。
+
+```bash
+bash cors-proxy/_test/drive.sh
+```
+
+重点盯的是幂等那几条：重跑必须沿用旧口令、不能把已配的 Key 抹掉、交互里回车要沿用而不是清空。这些以前是坏的——`update-function-configuration` 整体替换环境变量，不重填就清空。
 
 ## 项目结构
 

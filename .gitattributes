@@ -1,0 +1,13 @@
+# Shell 脚本一律 LF。deploy.sh 要在 Linux 的 CloudShell 里跑，
+# 一旦被 CRLF 污染就是 bad interpreter: /usr/bin/env bash^M，很难查。
+*.sh            text eol=lf
+.gitattributes  text eol=lf
+cors-proxy/_test/bin/aws      text eol=lf
+cors-proxy/_test/bin/python3  text eol=lf
+
+# 图片等二进制，别做换行转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

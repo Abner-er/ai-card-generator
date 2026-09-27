@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# 假的 aws cli —— 只用于本地验证 deploy.sh 的控制流，不碰真实 AWS
+# 用 $AWS_STUB_STATE 下的标记文件模拟「资源是否已存在」，从而同时覆盖
+# 「首次创建」和「重复运行走更新」两条分支。
+# env.json 记录最近一次 update-function-configuration 写入的环境变量，
+# get-function-configuration 再把它读回去，用来验证重跑是否沿用旧值。
+LOG="${AWS_STUB_LOG:-/dev/null}"
+STATE="${AWS_STUB_STATE:-/tmp/awsstub}"
+mkdir -p "$STATE"
+echo "aws $*" >> "$LOG"
+
+# 取选项的值，如 opt --environment '{"Variables":{...}}'
+opt() {
+  local want="$1"; shift
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "$want" ]; then printf '%s' "$2"; return 0; fi
+    shift
+  done
+  return 1
+}
+
+case "$1 $2" in
+  "sts get-caller-identity")
+    echo "123456789012"; exit 0 ;;
+
+  "iam get-role")
+    if [ -f "$STATE/role" ]; then
+      echo "arn:aws:iam::123456789012:role/ai-cors-proxy-lambda-role"; exit 0
+    fi
+    echo "An error occurred (NoSuchEntity) when calling the GetRole operation" >&2; exit 254 ;;
+
+  "iam create-role")
+    touch "$STATE/role"
+    echo "arn:aws:iam::123456789012:role/ai-cors-proxy-lambda-role"; exit 0 ;;
+
+  "iam attach-role-policy") exit 0 ;;
+
+  "lambda get-function-url-config")
+    if [ -f "$STATE/url" ]; then
+      echo "https://stub123456.lambda-url.ap-northeast-1.on.aws/"; exit 0
+    fi
+    echo "An error occurred (ResourceNotFoundException)" >&2; exit 254 ;;
+
+  "lambda create-function-url-config")
+    touch "$STATE/url"
+    echo "https://stub123456.lambda-url.ap-northeast-1.on.aws/"; exit 0 ;;
+
+  "lambda get-function")
+    if [ -f "$STATE/fn" ]; then exit 0; fi
+    echo "An error occurred (ResourceNotFoundException)" >&2; exit 254 ;;
+
+  "lambda create-function")
+    # 模拟创建失败：AWS_STUB_FAIL_CREATE=<n> 前 n 次失败、第 n+1 次成功；
+    # 设为 always 则一直失败。用来验证重试逻辑和失败时的报错输出。
+    want="${AWS_STUB_FAIL_CREATE:-}"
+    if [ -n "$want" ]; then
+      cnt=0
+      [ -f "$STATE/create_attempts" ] && cnt="$(cat "$STATE/create_attempts")"
+      cnt=$((cnt + 1))
+      printf '%s' "$cnt" > "$STATE/create_attempts"
+      if [ "$want" = "always" ] || [ "$cnt" -le "$want" ]; then
+        echo "An error occurred (InvalidParameterValueException) when calling the CreateFunction operation: STUB_CREATE_FAILED attempt $cnt" >&2
+        exit 254
+      fi
+    fi
+    touch "$STATE/fn"; exit 0 ;;
+
+  "lambda get-function-configuration")
+    # 没配过环境变量时真实 AWS 返回 null，这里照做
+    if [ -f "$STATE/env.json" ]; then
+      python3 -c 'import json,sys;print(json.dumps(json.load(open(sys.argv[1])).get("Variables")))' "$STATE/env.json"
+    else
+      echo "null"
+    fi
+    exit 0 ;;
+
+  "lambda get-policy")
+    if [ -f "$STATE/perm" ]; then
+      echo '{"Policy":"{\"Statement\":[{\"Sid\":\"FunctionURLAllowPublicAccess\"}]}"}'; exit 0
+    fi
+    echo "An error occurred (ResourceNotFoundException)" >&2; exit 254 ;;
+
+  "lambda wait") exit 0 ;;
+  "lambda update-function-code") exit 0 ;;
+
+  "lambda update-function-configuration")
+    env="$(opt --environment "$@" || true)"
+    if [ -n "$env" ]; then printf '%s' "$env" > "$STATE/env.json"; fi
+    exit 0 ;;
+
+  "lambda add-permission") touch "$STATE/perm"; exit 0 ;;
+
+  *) exit 0 ;;
+esac
