@@ -105,6 +105,7 @@ KEY_AGNES=sk-xxx KEY_CHECK=ms-xxx ./deploy.sh   # 环境变量预置 Key，跳�
 - **能重复跑。** 角色 / 函数 / URL 已存在就走更新分支。重跑不传口令会沿用已部署的，不传 Key 也不会把已配的 Key 抹掉——所以改完 `lambda/index.js` 直接重跑就行，前端不用动。
 - **默认 `nodejs24.x` + arm64。** 已有的函数如果还停在旧运行时，重跑会顺手升上去。要指定就 `RUNTIME=nodejs22.x ./deploy.sh`。（`nodejs20.x` 已于 2026-04-30 停止支持，别用。）
 - **区域取 `AWS_REGION`。** CloudShell 默认跟控制台右上角一致，跑之前先确认选对了。
+- **Function URL 一定要 `AuthType=NONE`，资源策略一定要两条。** 2025-10 起 AWS 对新建的 Function URL 要求 `lambda:InvokeFunctionUrl` 和 `lambda:InvokeFunction` 同时存在，只挂一条就是 403，报错还指不到原因。脚本每次都把 AuthType 拉回 `NONE`（控制台手建的 URL 默认是 `AWS_IAM`，这个不改一定 403），缺哪条策略补哪条，最后再读一次配置核验，不是 `NONE` 就直接失败退出。
 - 首次跑完把打出来的端点和口令填进应用后台（`#/admin`），或配到 GitHub Variables，再手动触发一次 Deploy Pages。
 
 端点写法是把真实地址拼在代理地址后面：
@@ -155,11 +156,13 @@ ALLOWED_ORIGINS  可选，逗号分隔。填了就只允许这些来源调用
 
 ### 部署脚本的回归测试
 
-`cors-proxy/deploy.sh` 改完跑一遍这个，不碰真实 AWS——用假 aws cli + 真 python3 走 8 个场景：全新部署、重跑幂等、只换一个 Key、交互重填 Key、无口令自动生成、区域缺失报错、创建失败重试后成功、创建一直失败打原始报错。
+`cors-proxy/deploy.sh` 改完跑一遍这个，不碰真实 AWS——用假 aws cli + 真 python3 走 10 个场景：全新部署、重跑幂等、只换一个 Key、交互重填 Key、无口令自动生成、区域缺失报错、创建失败重试后成功、创建一直失败打原始报错、老部署遗留（策略只有一条 + `AWS_IAM`）被修正、`AuthType` 改不动被收尾拦下。
 
 ```bash
 bash cors-proxy/_test/drive.sh
 ```
+
+假 aws cli 会像真 AWS 一样对重复的 `statement-id` 报 `ResourceConflictException`，也会记录 `AuthType` 状态，所以「少加一条策略」「重跑重复加策略」「URL 停在 `AWS_IAM`」这几类回归都能被抓住。
 
 重点盯的是幂等那几条：重跑必须沿用旧口令、不能把已配的 Key 抹掉、交互里回车要沿用而不是清空。这些以前是坏的——`update-function-configuration` 整体替换环境变量，不重填就清空。
 

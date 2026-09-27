@@ -55,6 +55,12 @@ chk "Function URL 用 NONE"       grep -q "lambda create-function-url-config .*a
 chk "Function URL 未传 --cors"   bash -c "! grep -q 'create-function-url-config.*--cors' '$AWS_STUB_LOG'"
 chk "补了公网访问策略"            grep -q "lambda add-permission" "$AWS_STUB_LOG"
 chk "add-permission 用 NONE"     grep -q "function-url-auth-type NONE" "$AWS_STUB_LOG"
+chk "补了 InvokeFunctionUrl 语句" grep -q "statement-id FunctionURLAllowPublicAccess" "$AWS_STUB_LOG"
+chk "补了 InvokeFunction 语句"    grep -q "statement-id FunctionURLAllowInvokeViaUrl" "$AWS_STUB_LOG"
+chk "InvokeFunction 带 URL 条件"  grep -q "invoked-via-function-url" "$AWS_STUB_LOG"
+# 2025-10 起 AuthType=NONE 必须两条策略并存，只加一条就是 403。数量卡死防漏
+chk "两条策略都加了（共 2 次）"    test "$(grep -c 'lambda add-permission' "$AWS_STUB_LOG")" -eq 2
+chk "输出了两条策略已添加"         test "$(grep -c '策略已添加' "$HERE/out-1.txt")" -eq 2
 chk "注入了 3 个 Key + 口令"      grep -q "已注入：KEY_AGNES, KEY_CHECK, KEY_SENSENOVA, PROXY_TOKEN" "$HERE/out-1.txt"
 chk "输出含 Function URL"         grep -q "stub123456.lambda-url" "$HERE/out-1.txt"
 chk "输出含生成端点"              grep -q "https/api.agnes-ai.cn/v1" "$HERE/out-1.txt"
@@ -86,6 +92,8 @@ chk "改走 update-function-code"   grep -q "lambda update-function-code" "$HERE
 chk "没再 create-function"        bash -c "! grep -q 'lambda create-function ' '$HERE/run2.log'"
 chk "没再 create-function-url"    bash -c "! grep -q 'lambda create-function-url-config' '$HERE/run2.log'"
 chk "没再 add-permission"         bash -c "! grep -q 'lambda add-permission' '$HERE/run2.log'"
+chk "重跑仍核验 AuthType=NONE"    grep -q "update-function-url-config.*auth-type NONE" "$HERE/run2.log"
+chk "识别出两条策略都在"          test "$(grep -c '策略已存在' "$HERE/out-2.txt")" -eq 2
 chk "update-config 带 --runtime"  grep -q "update-function-configuration.*--runtime nodejs24.x" "$HERE/run2.log"
 chk "识别出函数已存在"            grep -q "函数状态  已存在" "$HERE/out-2.txt"
 chk "口令沿用旧值"                grep -q "沿用已部署的口令" "$HERE/out-2.txt"
@@ -167,6 +175,41 @@ echo "退出码=$RC8"
 chk "退出码非 0"                 test "$RC8" -ne 0
 chk "点明下面是原始报错"          grep -q "以下是原始报错" "$HERE/out-8.txt"
 chk "原始报错真的打出来了"         grep -q "STUB_CREATE_FAILED" "$HERE/out-8.txt"
+
+echo
+echo "############ 第 9 次运行：老部署遗留（策略只有一条 + AuthType 是 AWS_IAM）############"
+# 模拟 2025-10 之前建出来、或用旧版脚本部署出来的状态：
+#   URL 停在控制台默认的 AWS_IAM，策略里只有 InvokeFunctionUrl 一条。
+# AuthType 不拉回 NONE 一定 403；缺的那条 InvokeFunction 在新要求下也必须补上。
+rm -rf "$AWS_STUB_STATE" "$AWS_STUB_LOG"
+mkdir -p "$AWS_STUB_STATE"
+touch "$AWS_STUB_STATE/fn" "$AWS_STUB_STATE/url"
+printf 'FunctionURLAllowPublicAccess\n' > "$AWS_STUB_STATE/perms"
+printf 'AWS_IAM' > "$AWS_STUB_STATE/auth_type"
+bash deploy.sh < /dev/null > "$HERE/out-9.txt" 2>&1
+RC9=$?
+echo "退出码=$RC9"
+echo "=== 第 9 次运行新增的 aws 调用 ==="
+cat "$AWS_STUB_LOG"
+chk "退出码为 0"                  test "$RC9" -eq 0
+chk "把 AuthType 拉回 NONE"       grep -q "update-function-url-config.*auth-type NONE" "$AWS_STUB_LOG"
+chk "补上了缺的 InvokeFunction"    grep -q "statement-id FunctionURLAllowInvokeViaUrl" "$AWS_STUB_LOG"
+chk "没重复加已有的那条"           test "$(grep -c 'statement-id FunctionURLAllowPublicAccess' "$AWS_STUB_LOG")" -eq 0
+chk "收尾核验没误报"              bash -c "! grep -q 'AuthType 是' '$HERE/out-9.txt'"
+
+echo
+echo "############ 第 10 次运行：AuthType 怎么都改不回 NONE（应收尾拦下）############"
+# 策略齐了但授权类型不对，一样是 403。这里验证收尾核验不是摆设
+rm -rf "$AWS_STUB_STATE" "$AWS_STUB_LOG"
+mkdir -p "$AWS_STUB_STATE"
+touch "$AWS_STUB_STATE/fn" "$AWS_STUB_STATE/url"
+printf 'AWS_IAM' > "$AWS_STUB_STATE/auth_type"
+AWS_STUB_AUTH_STUCK=1 bash deploy.sh < /dev/null > "$HERE/out-10.txt" 2>&1
+RC10=$?
+echo "退出码=$RC10"
+chk "退出码非 0"                  test "$RC10" -ne 0
+chk "点明 AuthType 不是 NONE"      grep -q "AuthType 是 AWS_IAM" "$HERE/out-10.txt"
+chk "给出了 403 的后果"            grep -q "403" "$HERE/out-10.txt"
 
 echo
 if [ "$FAIL" -eq 0 ]; then

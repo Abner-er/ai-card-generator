@@ -212,6 +212,8 @@ echo "  $(du -h "$PKG" | cut -f1) → index.js"
 # ── 3. 创建或更新函数 ───────────────────────────────────
 echo "[3/5] Lambda 函数"
 if [ "$FN_EXISTS" -eq 1 ]; then
+  # 上次更新可能还没落定（部署中断后重跑很常见），这时直接改代码会撞 ResourceConflictException
+  aws lambda wait function-updated --function-name "$FN_NAME"
   aws lambda update-function-code --function-name "$FN_NAME" --zip-file "fileb://$PKG" >/dev/null
   aws lambda wait function-updated --function-name "$FN_NAME"
   echo "  已更新代码"
@@ -260,10 +262,13 @@ echo "  已注入：$INJECTED"
 # ── 5. Function URL + 公网访问策略 ──────────────────────
 echo "[5/5] Function URL"
 if aws lambda get-function-url-config --function-name "$FN_NAME" >/dev/null 2>&1; then
+  # 控制台手建过的 URL 默认是 AWS_IAM，不改回 NONE 公网一律 403。
+  # 所以重跑时不能只看「存在」就放过，每次都把它拉回 NONE
+  aws lambda update-function-url-config \
+    --function-name "$FN_NAME" --auth-type NONE >/dev/null
   FN_URL="$(aws lambda get-function-url-config --function-name "$FN_NAME" --query FunctionUrl --output text)"
-  echo "  已存在"
+  echo "  已存在（已确保 AuthType=NONE）"
 else
-  # 授权类型必须是 NONE，选 AWS_IAM 会让 Authorization 头被 SigV4 吃掉；
   # 这里刻意不传 --cors，让本函数自己返回 CORS 头，避免 AWS 注入造成重复头
   FN_URL="$(aws lambda create-function-url-config \
     --function-name "$FN_NAME" \
@@ -272,18 +277,35 @@ else
   echo "  已创建"
 fi
 
-# AuthType=NONE 必须额外加资源策略，否则公网访问一律 403（AWS 文档明确要求单独执行）
-if aws lambda get-policy --function-name "$FN_NAME" --query Policy --output text 2>/dev/null \
-    | grep -q 'FunctionURLAllowPublicAccess'; then
-  echo "  公网访问策略已存在"
-else
+# AuthType=NONE 下资源策略必须两条并存，缺一条就是 403，而且报错完全指不到这里：
+#   1) lambda:InvokeFunctionUrl + 条件 FunctionUrlAuthType=NONE —— 允许经 URL 调用
+#   2) lambda:InvokeFunction    + 条件 InvokedViaFunctionUrl     —— 2025-10 起新增的硬要求
+# 见 https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html
+# 逐条查存在性再补，不能无脑重加：add-permission 撞上同名 statement-id 会报
+# ResourceConflictException，那样重跑就挂了
+POLICY_JSON="$(aws lambda get-policy --function-name "$FN_NAME" --query Policy --output text 2>/dev/null || true)"
+add_stmt() { # add_stmt <语句ID> <动作> [附加参数...]
+  local sid="$1" action="$2"
+  shift 2
+  if printf '%s' "$POLICY_JSON" | grep -q "\"$sid\""; then
+    echo "  策略已存在：$sid"
+    return 0
+  fi
   aws lambda add-permission \
     --function-name "$FN_NAME" \
-    --statement-id FunctionURLAllowPublicAccess \
-    --action lambda:InvokeFunctionUrl \
-    --principal '*' \
-    --function-url-auth-type NONE >/dev/null
-  echo "  公网访问策略已添加"
+    --statement-id "$sid" \
+    --action "$action" \
+    --principal '*' "$@" >/dev/null
+  echo "  策略已添加：$sid"
+}
+add_stmt FunctionURLAllowPublicAccess lambda:InvokeFunctionUrl --function-url-auth-type NONE
+add_stmt FunctionURLAllowInvokeViaUrl lambda:InvokeFunction --invoked-via-function-url
+
+# 策略齐了但 AuthType 被改回 AWS_IAM 一样是 403，跑完必须眼见为实
+AUTH_TYPE="$(aws lambda get-function-url-config --function-name "$FN_NAME" --query AuthType --output text)"
+if [ "$AUTH_TYPE" != "NONE" ]; then
+  echo "× Function URL 的 AuthType 是 $AUTH_TYPE（应为 NONE），浏览器访问会 403。请检查后重跑"
+  exit 1
 fi
 
 BASE="${FN_URL%/}"

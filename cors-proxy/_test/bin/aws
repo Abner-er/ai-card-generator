@@ -2,8 +2,12 @@
 # 假的 aws cli —— 只用于本地验证 deploy.sh 的控制流，不碰真实 AWS
 # 用 $AWS_STUB_STATE 下的标记文件模拟「资源是否已存在」，从而同时覆盖
 # 「首次创建」和「重复运行走更新」两条分支。
-# env.json 记录最近一次 update-function-configuration 写入的环境变量，
-# get-function-configuration 再把它读回去，用来验证重跑是否沿用旧值。
+# env.json  记录最近一次 update-function-configuration 写入的环境变量，
+#           get-function-configuration 再把它读回去，用来验证重跑是否沿用旧值。
+# perms     逐行记录已存在的资源策略语句 ID，get-policy 据此拼出策略。
+#           add-permission 对重复 ID 会像真实 AWS 一样报错，脚本没做幂等就会红。
+# auth_type 记录 Function URL 的授权类型，默认 NONE；可预置成 AWS_IAM 模拟
+#           控制台手建的 URL，用来验证脚本会不会把它拉回来。
 LOG="${AWS_STUB_LOG:-/dev/null}"
 STATE="${AWS_STUB_STATE:-/tmp/awsstub}"
 mkdir -p "$STATE"
@@ -36,14 +40,30 @@ case "$1 $2" in
   "iam attach-role-policy") exit 0 ;;
 
   "lambda get-function-url-config")
-    if [ -f "$STATE/url" ]; then
-      echo "https://stub123456.lambda-url.ap-northeast-1.on.aws/"; exit 0
+    if [ ! -f "$STATE/url" ]; then
+      echo "An error occurred (ResourceNotFoundException)" >&2; exit 254
     fi
-    echo "An error occurred (ResourceNotFoundException)" >&2; exit 254 ;;
+    if [ "$(opt --query "$@" || true)" = "AuthType" ]; then
+      if [ -f "$STATE/auth_type" ]; then cat "$STATE/auth_type"; else printf 'NONE'; fi
+      echo
+    else
+      echo "https://stub123456.lambda-url.ap-northeast-1.on.aws/"
+    fi
+    exit 0 ;;
 
   "lambda create-function-url-config")
     touch "$STATE/url"
+    at="$(opt --auth-type "$@" || true)"
+    printf '%s' "${at:-NONE}" > "$STATE/auth_type"
     echo "https://stub123456.lambda-url.ap-northeast-1.on.aws/"; exit 0 ;;
+
+  "lambda update-function-url-config")
+    # AWS_STUB_AUTH_STUCK=1 模拟「怎么改都改不回 NONE」，用来验证收尾核验能拦住
+    at="$(opt --auth-type "$@" || true)"
+    if [ -z "${AWS_STUB_AUTH_STUCK:-}" ] && [ -n "$at" ]; then
+      printf '%s' "$at" > "$STATE/auth_type"
+    fi
+    exit 0 ;;
 
   "lambda get-function")
     if [ -f "$STATE/fn" ]; then exit 0; fi
@@ -75,10 +95,21 @@ case "$1 $2" in
     exit 0 ;;
 
   "lambda get-policy")
-    if [ -f "$STATE/perm" ]; then
-      echo '{"Policy":"{\"Statement\":[{\"Sid\":\"FunctionURLAllowPublicAccess\"}]}"}'; exit 0
+    if [ ! -s "$STATE/perms" ]; then
+      echo "An error occurred (ResourceNotFoundException) when calling the GetPolicy operation" >&2
+      exit 254
     fi
-    echo "An error occurred (ResourceNotFoundException)" >&2; exit 254 ;;
+    python3 - "$STATE/perms" "$(opt --query "$@" || true)" <<'PY'
+import json, sys
+ids = [l.strip() for l in open(sys.argv[1]) if l.strip()]
+pol = {"Version": "2012-10-17",
+       "Statement": [{"Sid": i, "Effect": "Allow", "Principal": "*"} for i in ids]}
+if len(sys.argv) > 2 and sys.argv[2] == "Policy":
+    print(json.dumps(pol))
+else:
+    print(json.dumps({"Policy": json.dumps(pol)}))
+PY
+    exit 0 ;;
 
   "lambda wait") exit 0 ;;
   "lambda update-function-code") exit 0 ;;
@@ -88,7 +119,15 @@ case "$1 $2" in
     if [ -n "$env" ]; then printf '%s' "$env" > "$STATE/env.json"; fi
     exit 0 ;;
 
-  "lambda add-permission") touch "$STATE/perm"; exit 0 ;;
+  "lambda add-permission")
+    sid="$(opt --statement-id "$@" || true)"
+    # 真实 AWS 撞上同名 statement-id 会报 ResourceConflictException，这里照做
+    if [ -n "$sid" ] && [ -f "$STATE/perms" ] && grep -qx "$sid" "$STATE/perms"; then
+      echo "An error occurred (ResourceConflictException) when calling the AddPermission operation: The statement id ($sid) provided already exists." >&2
+      exit 254
+    fi
+    [ -n "$sid" ] && printf '%s\n' "$sid" >> "$STATE/perms"
+    exit 0 ;;
 
   *) exit 0 ;;
 esac
